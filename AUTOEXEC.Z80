@@ -1,0 +1,4 @@
+read fprun.hex
+xreg pc 0100
+
+

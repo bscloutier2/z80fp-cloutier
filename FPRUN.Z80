@@ -1,0 +1,272 @@
+; The following is a CPM test routine used to test various aspects of the
+;  Floating Point routines.  It shows how to use a couple of the functions.
+
+bios	equ	00005h
+
+lf	equ	00ah
+cr	equ	00dh
+
+	org	0100h
+
+start:	ld	sp,08000h
+	ld	hl,fp0
+	ld	hl,fixr
+
+; FP system is initialized
+
+	call	a_clr
+
+; Set a FIX
+
+	ld	a,-1
+	ld	(fixset),a
+
+; Here we read from keyboard, taking the appropriate actions to accumulate
+;  values and perform operations.
+
+rept:	ld	e,'#'
+	ld	c,02h
+	call	bios		; prompt for input
+
+	ld	de,buffer	; 20 character buffer
+
+; read keyboard
+
+gchar:	push	de		; preserve buffer pointer
+	ld	c,01h		; character read with echo
+	call	bios
+	pop	de
+
+	cp	'+'
+	jr	z,dck
+	cp	'-'
+	jr	nz,ckop
+
+dck:	ld	(de),a
+	dec	de
+	ld	a,(de)
+	inc	de
+
+	cp	'E'
+	ld	a,(de)
+	inc	de
+	jr	z,kok
+
+	dec	de
+
+; check for operations
+
+ckop:	ld	hl,goop
+	push	hl		; a return address
+
+	cp	'='		; calculate
+	ret	z
+	cp	'+'		; addition
+	ret	z
+	cp	'-'		; subtraction
+	ret	z
+	cp	'*'		; multiplication
+	ret	z
+	cp	'/'		; division
+	ret	z
+	cp	'('		; left parenthesis
+	ret	z
+	cp	')'		; right parenthesis
+	ret	z
+	cp	'^'		; exponent
+	ret	z
+	cp	'@'		; clear
+	ret	z
+	cp	'F'		; FIX
+	ret	z
+	cp	'!'		; CHS
+	ret	z
+
+	pop	hl		; discard return address
+
+; characters are buffered
+
+	ld	(de),a		; save character
+	inc	de		; bump pointer
+
+; check for errors
+
+	cp	'.'
+	jr	z,kok
+	cp	'E'
+	jr	z,kok
+	cp	'0'
+	jr	c,kerr
+	cp	'9'+1
+	jr	nc,kerr
+
+kok:	ld	hl,buffer+20
+	or	a
+	sbc	hl,de		; buffer full?
+	jr	nz,gchar	; NO! then continue to obtain entry
+
+; sounds beep on error
+
+kerr:	push	de		; save buffer pointer
+	ld	e,7		; bell
+	ld	c,02h
+	call	bios
+
+	pop	de
+	dec	de		; ignore last character received
+	jr	gchar		; continue loop
+
+; now we must ready ourselves to perform the operation
+
+goop:	ld	(oper),a	; save operation
+
+	xor	a
+	ld	(de),a		; terminate string with null
+
+	push	de
+	ld	de,crlf
+	ld	c,9
+	call	bios		; echo a carriage return/line feed
+	pop	de
+
+	ld	hl,buffer
+	or	a
+	sbc	hl,de		; any value entered?
+	jr	z,noval		; NO! then no action
+
+; Now the ASCII number stored in the buffer is pushed onto the stack.  The
+;  routine _LOAD overwrites the top stack position so we must _ENTER
+;  first to move the stack content down.
+
+	call	_enter
+
+	ld	hl,buffer
+	call	_load
+
+; Now the operation of interest is performed
+
+noval:	ld	hl,opdone
+	push	hl		; sets a return address
+
+	ld	a,(oper)
+	cp	'='		; calculate
+	jp	z,a_calc
+	cp	'+'		; addition
+	jp	z,a_add
+	cp	'-'		; subtration
+	jp	z,a_sub
+	cp	'*'		; multiplication
+	jp	z,a_mul
+	cp	'/'		; division
+	jp	z,a_div
+	cp	'('		; left parenthesis
+	jp	z,a_left
+	cp	')'		; right parenthesis
+	jp	z,a_rght
+	cp	'^'		; exponent
+	jp	z,a_ytox
+	cp	'@'		; clear
+	jp	z,a_clr
+	cp	'F'		; FIX
+	jp	z,fixdo
+	cp	'!'
+	jp	z,_chs
+
+	pop	hl		; discard address
+
+; After operations you need to test the various flags.  The following tests
+;  each flag and displays the appropriate string (if any).
+
+opdone:	call	show		; show the registers
+
+	ld	a,(flg)
+	bit	0,a		; overflow error
+	ld	de,o_msg
+	ld	c,9
+	call	nz,bios
+	
+	ld	a,(flg)
+	bit	1,a		; divide by zero
+	ld	de,d_msg
+	ld	c,9
+	call	nz,bios
+
+	ld	a,(flg)
+	bit	2,a		; illegal operation
+	ld	de,i_msg
+	ld	c,9
+	call	nz,bios
+
+	ld	a,(flg)
+	bit	3,a		; illegal operation
+	ld	de,g_msg
+	ld	c,9
+	call	nz,bios
+
+	ld	a,(flg)
+	bit	4,a		; format overflow
+	ld	de,f_msg
+	ld	c,9
+	call	nz,bios
+	jp	rept		; and loop
+
+; Here we set FIXSET
+
+fixdo:	call	_ftoi
+
+	ld	a,l
+	ld	(fixset),a	; set FIXSET
+	jp	pop		; drop top value & return
+
+; Here we display all four registers top to bottom
+
+show:	ld	a,(flags)	; preserve flags
+	ld	(flg),a
+
+	xor	a		; start with register 0
+show0:	push	af		; save register specifier
+	ld	hl,display
+	call	_value		; obtain ASCII string from selected register
+
+	ld	a,(flg)
+	ld	hl,flags
+	or	(hl)
+	ld	(flg),a		; accumulate flags
+
+	ld	de,display
+	ld	c,9
+	call	bios		; displays string
+
+	pop	af
+	inc	a		; advance to next register
+
+	push	af
+	and	3
+	ld	de,crlf
+	ld	c,9
+	call	z,bios
+
+	pop	af
+	cp	12		; done?
+	jr	nz,show0	; NO! then repeat
+	ret
+
+oper:	defb	0
+flg:	defb	0
+
+buffer:	defb	'                    ',0
+
+display:defb	'              ','$'
+crlf:	defb	cr,lf,'$'
+
+o_msg:	defb	'Overflow!',cr,lf,'$'
+d_msg:	defb	'Divide by Zero!',cr,lf,'$'
+i_msg:	defb	'Illegal Operation!',cr,lf,'$'
+g_msg:	defb	'Too Many Parenthesis!',cr,lf,'$'
+f_msg:	defb	'Format Overflow!',cr,lf,'$'
+	form
+
+*include fp.z80
+	end
+
+

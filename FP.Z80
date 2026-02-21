@@ -1,0 +1,2642 @@
+; ***************************************************************************
+;	   Algebraic to Revese Polish Notation Conversion Routines
+; ***************************************************************************
+
+; These routines perform the algebraic translation to polish postfix
+;  which can utilize the Floating Point Package.  This affects only the
+;  _ADD, _SUB, _MUL, _DIV and _YTOX routines and adds the A_LEFT, A_RGHT and
+;  A_CALC routines for parenthesis and the equals sign.	 A_CLR performs
+;  a overall clear.
+
+;  A direct call to _ENTER and _LOAD is used to place each operand on the
+;  FP stack.  If the operation is one of "+-*/^()=" or CLR then one of
+;  the following operations is called.  All other funtions (i.e. SQRT, SIN,
+;  etc.) are immediate and call the FP package directly.
+
+; The following funtions implement algebraic ordering, order of precedence
+;  and parenthesis grouping.
+
+;	A_CLR		reset calculator
+;	A_CALC		complete calculation of algebraic expression (=)
+
+;	A_ADD		add following operand to top of stack
+;	A_SUB		subtract following operand from top of stack
+;	A_MUL		multiply following operand with top of stack
+;	A_DIV		divide top of stack by following operand
+;	A_YTOX		top of stack raised by following operand
+
+;	A_LEFT		Left parenthesis begins operand grouping
+;	A_RGHT		Right parenthesis ends operand grouping
+
+; Order of precedence is impletmented as follows in order from highest to
+;  lowest:
+
+;	* parenthesis grouping
+;	* exponent
+;	* multiplication and division from left to right
+;	* addition and subtraction from left to right
+
+; As is usual with FP use the FLAGS variable should be checked after every
+;  operation.  An additional flag indicates parenthesis grouping overflow.
+
+; Flags
+;	D0 - Overflow		; set on overflow
+;	D1 - Divide by Zero	; set on divide by zero
+;	D2 - Illegal Op		; Illegal Operation
+;	D3 - Level Error	; set when grouping goes too deep
+;	D4 - Format Overflow	; Scientific notation required
+	form
+; ***************************************************************************
+;			      Constant Definitions
+; ***************************************************************************
+
+; OPSIZ defines the size of the operator stack.  This must be set large
+;  enough to accomodate the three (3) levels of precision plus a parenthesis
+;  marker for each level of parenthesis allowed.  The stack is made one
+;  larger for safety.  Note that greater levels of parenthesis are possible
+;  depending on the complexity of the equation.
+
+parlev	equ	4
+opsiz	equ	4*parlev + 1
+
+; FP package vectors
+
+opvect:	defw	_ytox		; exponent
+	defw	_mul		; multiplication
+	defw	_div		; division
+	defw	_add		; addition
+	defw	_sub		; subtraction
+	defw	$rtrn		; discards
+
+; operator descriptors for stack entry.
+;  format:	high byte = order of precedence
+;		 low byte = index into operator vector
+
+v.ytox	equ	0000h
+v.mul	equ	0102h
+v.div	equ	0104h
+v.add	equ	0206h
+v.sub	equ	0208h
+v.left	equ	030ah
+v.end	equ	0400h		; no operation is associated
+
+; ***************************************************************************
+;				   Variables
+; ***************************************************************************
+
+; The following stack provides sufficient space for up to 8 levels
+;  parenthesis grouping
+
+opstk:	defs	2*opsiz
+
+; Stack pointer
+
+opptr:	defs	2		; pointer to next word in operator stack
+	form
+; ***************************************************************************
+;				Algebraic Routines
+; ***************************************************************************
+
+; **********
+; Subroutine: a_clr
+; **********
+
+; Perform overall reset
+
+a_clr:	ld	hl,opstk	; top of operator stack
+	ld	(opptr),hl	; pointer reset
+
+	ld	bc,v.end	; end of expression marker
+	call	a$push		; placed on stack
+	jp	_clr		; clear FP package and return
+
+; **********
+; Subroutine: a_calc
+; **********
+
+; Complete calculation of current expression
+
+a_calc:	ld	c,4		; precedence
+	jr	a$do		; perform calculations and return
+
+; **********
+; Subroutine: a_left
+; **********
+
+; Left parenthesis begins operand grouping.  The left parenthesis is placed
+;  on the operator stack.
+
+a_left:	ld	bc,v.left	; parenthesis marker
+	jr	a$push		; place on stack and return
+
+; **********
+; Subroutine: a_rght
+; **********
+
+; Right parenthesis completes an operand grouping and evaluates its content
+;  leaving the result on the top of the FP stack.  All operations on the
+;  operator stack are performed until the left parenthesis is located.
+
+a_rght:	ld	c,3		; level of precedence
+	call	a$do		; perform calculations
+	jr	z,a$pop		; discard left parenthesis if present
+	ret			; done otherwise (end of expression)
+
+; **********
+; Subroutine: a_add
+; **********
+
+; Causes any previous operation to be performed.  The ADD operation is
+;  placed on the operator stack.
+
+a_add:	ld	c,3		; level of precedence
+	call	a$do		; perform calculations
+
+	ld	bc,v.add
+	jr	a$push		; place marker on stack and return
+
+; **********
+; Subroutine: a_sub
+; **********
+
+; Causes any previous operation to be performed.  The SUB operation is
+;  placed on the operator stack.
+
+a_sub:	ld	c,3		; level of precedence
+	call	a$do		; perform calculations
+
+	ld	bc,v.sub
+	jr	a$push		; place marker on stack and return
+
+; **********
+; Subroutine: a_mul
+; **********
+
+; Causes and multiplication, division or exponent operations on the stack to
+;  be performed.  The MUL operation is placed on the operator stack.
+
+a_mul:	ld	c,2		; level of precedence
+	call	a$do		; perform calculations
+
+	ld	bc,v.mul
+	jr	a$push		; place marker on stack and return
+
+; **********
+; Subroutine: a_div
+; **********
+
+; Causes and multiplication, division or exponent operations on the stack to
+;  be be performed.  The DIV operation is placed on the operator stack.
+
+a_div:	ld	c,2		; level of precedence
+	call	a$do		; perform calculations
+
+	ld	bc,v.div
+	jr	a$push		; place marker on stack and return
+
+; **********
+; Subroutine: a_ytox
+; **********
+
+; Causes exponent operations on the stack to be performed.  The YTOX
+;  operation is placed on the operator stack.
+
+a_ytox:	ld	c,1		; level of precedence
+	call	a$do		; perform calculations
+
+	ld	bc,v.ytox
+	jr	a$push		; place marker on stack and return
+	form
+
+; ***************************************************************************
+; 			   Internal Utility Routines
+; ***************************************************************************
+
+; A$PUSH
+
+; Routine places operation marker in reg.bc on operator stack if there is
+;  enough room.  The appropriate flag is set otherwise.
+
+a$push:	ld	hl,(opptr)	; current stack pointer
+	ld	de,opstk + 2*opsiz
+	or	a
+	sbc	hl,de		; room in stack?
+	jr	c,apush0	; YES! then continue
+
+	ld	hl,flags
+	set	3,(hl)		; indicate stack overflow
+	ret			; exit
+
+; place marker on stack
+
+apush0:	ld	hl,(opptr)	; pointer
+	ld	(hl),c
+	inc	hl
+	ld	(hl),b
+	inc	hl
+	ld	(opptr),hl	; pointer updated - item on stack
+	ret			; done
+
+; A$POP
+
+; Routine removes top item from the stack.  Returns marker in reg.bc.
+;  Z is set if stack was empty.
+
+a$pop:	ld	hl,(opptr)	; pointer
+	dec	hl
+	ld	b,(hl)
+	dec	hl
+	ld	c,(hl)
+	ld	(opptr),hl	; pointer updated
+$rtrn:	ret
+
+; A$DO
+
+; Performs operation from top of operator stack with level of precedence
+;  less than that supplied in reg.b.
+
+a$do:	ld	hl,(opptr)	; pointer to top of stack
+	dec	hl		; address high byte
+	ld	a,(hl)		; retrieve level of precedence
+	cp	c		; less than or equal to this?
+	ret	nc		; NO! then done
+
+	push	bc		; save precedence
+	call	ado0		; perform operation from stack
+	pop	bc		; retrieve precedence
+	jr	a$do		; repeat
+
+; Perform operation as stored on top of the operator stack
+
+ado0:	call	a$pop		; obtain marker
+
+	ld	b,0		; convert index to word
+	ld	hl,opvect	; FP operation vector
+	add	hl,bc		; pointer into vector
+
+; get address of operation and go do it
+
+	ld	a,(hl)
+	inc	hl
+	ld	h,(hl)
+	ld	l,a
+	jp	(hl)		; perform operation and return
+	form
+
+; ***************************************************************************
+; 			   Floating Point Package
+; ***************************************************************************
+
+; The following are the available entry points:
+
+;	_CLX		zeroes the top stack position
+;	_CLR		zeroes all registers
+
+;	_ROLLU		roll stack up (top goes to bottom)
+;	_ROLLD		roll stack down (bottom goes to top)
+;	_LASTX		restores last value to top of stack
+;	_SWAP		exchange the top two stack positions
+;	_CHS		change the sign of the top value on the stack
+
+;	_ENTER		duplicates top stack position, bottom is lost
+;	_LOAD		enter ASCII formatted value on top of stack
+;	_IOTF		unsigned integer in reg.hl is pushed onto stack
+;	_BTOF		signed byte value in reg.a is pushed onto stack
+
+;	_FTOI		extracts integer value from top of stack
+;	_SCI		extract scientific notation ASCII string
+;	_VALUE		extract ASCII representation of FP0
+
+;	_ADD		add top two stack postions, bottom duplicated
+;	_SUB		subtract top from the second on stack, bottom dup'ed
+;	_MUL		multiply top two stacks, bottom duplicated
+;	_DIV		divide top into second, bottom duplicated
+
+;	_INT		replace top value with its integer value
+;	_ABS		replace top value with its absolute value
+
+;	_SQRT		square root of value
+;	_YTOX		second value to the power of the top value
+;	_EXP		exponential function: e to the x
+;	_LN		natural logarithm
+
+;	_SIN		sine of value in radians
+;	_COS		cosine of value in radians
+;	_TAN		tangent of value in radians
+;	_ATN		arctangent (returns radians)
+
+; Flags
+;	D0 - Overflow		; set on overflow
+;	D1 - Divide by Zero	; set on divide by zero
+;	D2 - Illegal Op		; Illegal Operation
+;	D3 - Reserved
+
+; ***************************************************************************
+; 			Floating Point Register Format
+; ***************************************************************************
+
+; Floating Point numbers are stored in the following format.  There are
+;  many differing formats for floating point.  There is no particular
+;  advantage to ours except in that it is compatible with other DTI
+;  product usage.
+
+; The Floating Point (abbrieviated FP) value is represented by a fractional
+;  part called the 'Mantissa' and an order of magnitude called the 'Exponent'.
+;  The mantissa is a scaled decimal value less than 1.00000.  It has a sign
+;  and therefore may be either positive or negative.  The exponent defines
+;  the order of magnitude to which the fractional part is scaled to form the
+;  intended value.  The exponent is the power applied to some base in order
+;  to obtain the scaling factor.  We will use base two, however, we may have
+;  used another.  A higher base such as sixteen would allow use to represent
+;  extremely large and very minute values.  As we will see base two provides
+;  enough range.  The largest value that may be represented is 1.7E+38.  The
+;  smallest being 3.5E-46.
+
+; The exponent will be stored in a single signed byte.  This value can then
+;  be in the range -127 through +127.  This is stored in excess 128 form,
+;  that is that 07fh represents -1, 080h represents 0 and 081h represents
+;  positive 1.  The largest exponent being +127 stored as 0ffh and the 
+;  smallest being -127 stored as 001h.  Note that we reserve the exponent
+;  value of 000h to indicate FP zero, the value 0.00000.  The sign of the
+;  exponent is indicated by bit 7.
+
+; The value 0.08714E+10 is more precisely maintained in the form 0.87143E+09.
+;  This takes advantage of the available precision afforded by the size of
+;  the mantissa.  The latter value is 'Normalized' in that the digit 
+;  immediately to the right of the decimal point is nonzero.  In binary
+;  form a normalized FP value always has the MSB of the mantissa equal to
+;  a 1.  The fractional part then always assumes a value from 0.500 to 
+;  1.00 since our base is 2.
+
+; Since the MSB of the mantissa is always 1 we don't bother to store it and
+;  we use this bit position to store the sign of the entire FP value.  Thus
+;  if the MSB of the mantissa has bit 7 set then then value is negative.
+
+; The entire FP register is 4 bytes (a 1 byte exponent and a 24 bit mantissa).
+;  This is stored is successive memory locations from LSB to MSB of the
+;  mantissa followed by the exponent.
+
+; Here are some examples:
+
+;	0aah,056h,019h,080h	; +0.598979
+;	0f1h,022h,076h,080h	; +0.961471
+;	045h,0aah,038h,082h	; +2.88539
+;	064h,026h,099h,087h	; -76.575
+
+; ***************************************************************************
+; 				Variables
+; ***************************************************************************
+
+sign0:	defb	000h		; stores sign of FP0 during calculation
+sign1:	defb	000h		; stores sign of FP1 during calculation
+
+fixset:	defb	-1		; FIX mode = 0-6, SCI mode = -1
+
+; Flags
+;	D0 - Overflow		; set on overflow
+;	D1 - Divide by Zero	; set on divide by zero
+;	D2 - Illegal Op		; Illegal Operation
+;	D3 - Reserved
+;	D4 - Format Overflow	; Scientific notation required
+
+flags:	defb	000h		; calculator flags
+
+texp:	defb	000h		; tens exponent during conversions
+
+stkd:	defb	000h		; stack depth
+
+; buffer for significant digits
+
+sdigs:	defb	'+000000'
+
+; ***************************************************************************
+; 			Floating Point Register Stack
+; ***************************************************************************
+
+; We use a single precision stack.  FP0 is our floating point
+;  accumulator.  FP3 is replicated on POP operations.  FPX and FPY are
+;  additional registers for scratch use.  FPX resides immediately following
+;  the register stack to assist in ROLL UP and ROLL DOWN operations.
+
+numreg	equ	3*parlev
+
+;	      |-Guard-|----Mantissa----|-Exponent-|
+
+fp0:	defb	000h,	000h,000h,000h,    000h
+fp1:	defs	5*(numreg-1)
+fpx:	defb	000h,	000h,000h,000h,    000h
+
+fpy:	defb	000h,	000h,000h,000h,    000h
+fpz:	defb	000h,	000h,000h,000h,    000h
+
+; Temporary storage for copy of registers
+
+regs:	defs	(numreg+1)*5
+
+; ************************** END OF VARIABLES *******************************
+	form
+
+; ***************************************************************************
+;			     Basic Operations
+; ***************************************************************************
+
+; **********
+; Subroutine: _clx
+; **********
+
+; Routine clears FP0 only
+
+_clx:	ld	hl,fp0		; initialize pointers and count
+	ld	de,fp0+1
+	ld	bc,4
+
+	ld	(hl),0		; clear the initial byte
+	ldir			; repeat to clear balance of bytes
+	ret			; done
+
+; **********
+; Subroutine: _clr
+; **********
+
+; Routine clears all fp registers
+
+_clr:	ld	hl,fp0		; initialize pointers and count
+	ld	de,fp0+1
+	ld	bc,5*numreg-1	; clear full registers
+
+	ld	(hl),0		; clear the initial byte
+	ldir			; repeat to clear balance of bytes
+	ret			; done
+
+; **********
+; Subroutine: _rollu
+; **********
+
+; Routine rolls the stack up one position and FP3 gets FP0.
+
+_rollu:	ld	hl,fp0		; source
+	ld	de,fpx		; destination
+	ld	bc,5		; move one full register
+	ldir			; copy FP0 to scratch register
+
+	ld	hl,fp1		; source
+	ld	de,fp0		; destination
+	ld	bc,5*numreg	; move full registers
+	ldir			; shift all registers up
+	ret
+
+; **********
+; Subroutine: _rolld
+; **********
+
+; Routine rolls the stack down one position and FP0 gets FP3.
+
+_rolld:	ld	hl,fpx-1	; source
+	ld	de,fpx+4	; destination
+	ld	bc,5*numreg	; move full registers
+	lddr
+
+	ld	hl,fpx		; source
+	ld	de,fp0		; destination
+	ld	bc,5		; one full register
+	ldir
+	ret
+
+; **********
+; Subroutine: _lastx
+; **********
+
+; Routine obtains last saved value of accumulator
+
+_lastx:	ld	hl,fpx
+	jp	push		; push stack
+
+; **********
+; Subroutine: _swap
+; **********
+
+; Routine exchanges FP0 and FP1
+
+_swap:	ld	hl,fp0		; address the two registers
+	ld	de,fp1
+	ld	b,5		; register length
+
+; now loop and perform exchange
+
+swap0:	ld	a,(de)
+
+	ld	c,(hl)
+	ld	(hl),a
+	inc	hl
+
+	ld	a,c
+	ld	(de),a
+	inc	de
+	djnz	swap0
+	ret			; done
+
+; **********
+; Subroutine: _chs
+; **********
+
+; Routine changes the sign of the accumulator
+
+_chs:	ld	hl,fp0+3	; MSB of accumulator mantissa
+	ld	a,80h
+	xor	(hl)
+	ld	(hl),a		; toggled bit 7
+	ret
+
+; **********
+; Subroutine: _enter
+; **********
+
+; Routine performs an ENTER.  Registers shift down and FP0 is copied.
+
+_enter:	ld	hl,fpx-6	; source
+	ld	de,fpx-1	; destination
+	ld	bc,5*(numreg-1)	; full registers are moved
+	lddr			; copy proceeds in reverse direction
+	ret
+
+; ***************************************************************************
+; 			Numeric Entry/Display Routines
+; ***************************************************************************
+
+; **********
+; Subroutine: _load
+; **********
+
+; Routine accepts an ASCII string terminated by a nul and enters the value
+;  on the top of the register stack.  Entry is with reg.hl addressing the
+;  ASCII string.
+
+; skip leading spaces
+
+_load:	push	hl		; save pointer
+	call	savreg		; preserve registers
+
+	pop	hl
+	ex	(sp),hl		; obtain pointer
+
+load0:	call	leads		; skip leading spaces
+	cp	'+'		; is first nonblank a sign?
+	jr	nz,notpos	; NO! then continue
+
+; the plus sign is ignored
+
+	inc	hl		; bump pointer of the sign
+	jr	load0		; proceed with load
+
+notpos:	cp	'-'		; is value to be negative?
+	push	af		; save sign indication
+	jr	nz,notneg	; NO! then continue
+
+	inc	hl		; skip sign
+	call	leads		; skip any further spaces
+
+notneg:	push	hl		; save pointer
+
+	call	_clx		; clear the top register
+
+	xor	a
+	ld	(texp),a	; clear decimal point position indicator
+
+nload:	pop	hl		; pointer
+	ld	a,(hl)		; get character
+	inc	hl		; bump pointer
+	push	hl		; save pointer
+
+	and	a		; nul?
+	jr	z,dload		; if nul then we are done
+
+	cp	'.'		; decimal point encountered
+	jr	nz,notdec	; NO! then continue
+
+; now we set the indicator to nonzero.  This indicates that a decimal point
+;  has been found and that we need to tract its position.
+
+	ld	hl,texp
+	ld	(hl),1		; indicate decimal point found
+	jr	nload		; on to next digit
+
+; now we accumulate the digit
+
+notdec:	sub	'0'		; convert to binary
+	cp	10		; is this 0-9?
+	jr	nc,dload	; NO! then done
+
+	push	af		; save digit
+
+	ld	hl,texp		; address decimal point position indicator
+	ld	a,(hl)
+	and	a		; encountered decimal point?
+	jr	z,nodec		; NO! then do not change indicator
+
+	inc	(hl)		; indicate additional digit beyond decimal pt.
+
+nodec:	ld	hl,ten
+	call	push
+	call	_mul		; multiply by 10.00
+
+	pop	af		; retrieve digit
+	ld	l,a		; convert to word
+	ld	h,0
+	call	_itof		; load FP0 with integer
+
+	call	_add		; add to accumulation
+	jr	nload		; load next character
+
+; Now we are done.  If a decimal point was included then we adjust the
+;  scaling of the final value to properly place the point.
+
+dload:	ld	a,(texp)
+	cp	2		; any decimal point?
+	jr	c,dload0	; NO! then we are properly scaled
+
+	dec	a		; adjusted to obtain count for scaling
+	ld	b,a		; scale by this
+lscale:	push	bc		; save count
+
+	ld	hl,ten
+	call	push
+	call	_div		; divide by 10.0
+
+	pop	bc
+	djnz	lscale		; continue to scale
+
+; Lastly we must check the desired sign of this value
+
+dload0:	pop	hl		; retrieve pointer
+	dec	hl		; return to last character encountered
+
+	ld	a,(hl)		; obtain character
+	inc	hl		; bump pointer
+
+	cp	'E'		; exponent specified?
+	jr	nz,dload1	; NO! then we are done
+
+; now get sign of exponent
+
+	ld	a,(hl)		; obtain character
+	cp	'+'		; plus sign?
+	jr	nz,notp		; NO! then continue
+
+	inc	hl		; skip plus sign
+notp:	cp	'-'		; negative sign?
+	push	af		; save flag for later sign adjust
+	jr	nz,notn		; NO! then proceed
+
+	inc	hl		; skip sign
+
+; now we need to obtain the magnitude of the specified exponent
+
+notn:	ld	b,0		; clear accumulation
+
+gexp:	ld	a,(hl)		; get digit
+	inc	hl		; bump pointer
+	sub	'0'		; convert to binary
+	cp	10		; is it 0-9?
+	jr	nc,dexp		; NO! then done with exponent
+
+	ld	c,a		; save digit
+
+	ld	a,b
+	add	a		; multiply by 10
+	add	a
+	add	b
+	add	a
+	add	c
+	ld	b,a
+	jr	gexp		; continue to get exponent
+
+dexp:	ld	a,b		; get magnitude of exponent
+	and	a		; zero?
+	jr	z,fexp		; YES! then done here
+
+dexp0:	pop	af		; sign flag
+
+dexp1:	push	bc		; save counter
+	push	af		; save flag
+
+	ld	hl,ten
+	call	push
+
+	pop	af
+	push	af
+	jr	z,dexp2		; jump if exponent is negative
+	call	_mul		; scale in appropriate direction
+	jr	dexp3
+
+dexp2:	call	_div
+dexp3:	pop	af		; flag
+	pop	bc		; retrieve counter
+	djnz	dexp1
+	jr	dload1
+
+; now set proper sign
+
+fexp:	pop	af		; discard flag
+dload1:	pop	af		; sign indication
+	jp	z,_chs		; negate if a negative sign was encountered
+	ret
+
+; Routine skips spaces in the string addressed by reg.hl.
+
+leads:	ld	a,(hl)		; get first character
+	inc	hl		; bump pointer
+	cp	' '		; is it a space
+	jr	z,leads		; YES! then skip it
+
+	dec	hl		; adjust pointer
+	ret			; return
+
+; **********
+; Subroutine: _itof
+; **********
+
+; Routine loads top register with integer value of reg.hl.  Integer value
+;  is unsigned.
+
+_itof:	push	hl		; save value
+	call	_enter		; move stack down
+	call	_clx		; clear top of stack
+
+	pop	hl		; integer value
+	ld	(fp0+2),hl	; loaded into FP0
+
+	ld	a,90h
+	ld	(fp0+4),a	; set exponent for 2^16
+
+	xor	a
+	ld	(sign0),a	; clear sign to positive
+	jp	norm		; normalize FP0 and return
+
+; **********
+; Subroutine: _btof
+; **********
+
+; Routine loads top register with signed integer value of reg.a.
+
+_btof:	push	af		; save value
+	call	_enter		; move stack down
+	call	_clx		; clear top of stack
+
+	pop	af		; integer value
+	ld	(fp0+3),a	; loaded into FP0
+
+	and	080h		; extract sign
+	ld	(sign0),a
+	jr	z,btof0		; jump if positive
+
+	ld	a,(fp0+3)
+	neg		 	; negate the value
+	ld	(fp0+3),a
+
+btof0:	ld	a,88h
+	ld	(fp0+4),a	; set exponent for 2^8
+	jp	norm		; normalize FP0 and return
+
+; **********
+; Subroutine: _ftoi
+; **********
+
+; routine extracts integer value of FP0 into registers.  Returns 24 bit
+;  integer in reg.e and reg.hl.  The MSB in reg.e.
+
+_ftoi:	ld	a,(fp0+4)	; exponent
+	cp	081h		; check scale
+	jr	c,zftoi		; <1 so return zero
+	cp	099h		; value too large?
+	ret	nc		; YES! then no action (for now)
+
+	ld	hl,fp0+1
+	ld	de,fpy+1
+	ld	bc,4
+	ldir			; get a scratch copy of fp0
+
+; First we extract the sign
+
+	ld	hl,fpy+3
+	ld	a,(hl)
+	set	7,(hl)		; set MSB of mantissa
+	and	080h
+	push	af		; save sign
+
+; Now we scale the fractional part of FP0 by 1/2 and increase its exponent by
+;  1.  We do this until the exponent is 098h then the mantissa is the
+;  integer part.
+
+ftoic:	ld	a,(fpy+4)	; obtain exponent
+	cp	098h		; scaled properly?
+	jr	z,ftoir		; YES! then we have the integer part
+
+	ld	hl,fpy+3	; MSB of mantissa
+	ld	b,3		; three bytes
+	xor	a		; clear CY
+
+; Perform shift through the mantissa
+
+ftois:	rr	(hl)		; divide by two (CY gets bit 0)
+	dec	hl		; to next byte
+	djnz	ftois		; complete shift through mantissa
+
+	ld	hl,fpy+4	; address exponent
+	inc	(hl)		; increased
+	jr	ftoic		; repeat
+
+; Now we return the integer and discard the scratch register
+
+ftoir:	ld	hl,fpy+3
+	ld	e,(hl)		; obtain MSB
+	ld	hl,(fpy+1)	; obtain lower 16 bits
+
+	pop	af		; obtain sign flag
+	ret	z		; return if positive
+
+; negate the integer value
+
+	xor	a
+	sub	l
+	ld	l,a
+
+	ld	a,0
+	sbc	h
+	ld	h,a
+
+	ld	a,0
+	sbc	e
+	ld	e,a
+	ret			; done
+
+; returns zero
+
+zftoi:	xor	a
+	ld	hl,0
+	ret
+
+; **********
+; Subroutine: _value
+; **********
+
+; Routine returns a 12 character ASCII string for the selected register.
+;  Reg.a defines the desired register (0-3).  Reg.hl specifies the
+;  destination address.
+
+_value:	push	hl		; save string destination address
+
+; blank the destination string
+
+	ld	d,h
+	ld	e,l
+	inc	de
+	ld	bc,11
+	ld	(hl),' '
+	ldir			; copy blanks into the string
+
+	call	savreg		; save registers
+	call	gdig		; extract significant digits and exponent
+
+	pop	hl
+	ex	(sp),hl		; string address
+	ex	de,hl
+
+; if the value exceeds 999999. then scientific notation is required.  If
+;  the value is less than .100000 scientific notation is also used.
+
+	ld	a,(texp)
+	cp	-5		; should we check for tame decimals?
+	jr	c,val.g		; NO! then check other
+
+; now if there are enough trailing zeroes we can display without using
+;  scientific notation.  Here we count the trailing zeroes.
+
+	neg			; count of needed zeroes
+	ld	b,a
+
+	ld	hl,sdigs+6	; last digit
+
+val.dz:	ld	a,'0'		; the desired zero
+	cp	(hl)		; match?
+	jr	z,val.d2	; YES! then on to next digit
+
+	ld	a,(fixset)
+	cp	7		; FIX notation in use?
+	jr	nc,fix.e	; NO! then we need scientific notation
+
+val.d2:	dec	hl		; back to previous digit
+	djnz	val.dz		; check further
+
+; If we fall through here then there are enough zeroes to avoid the
+;  scientific notation requirement
+
+val.fx:	push	de
+
+	ld	de,sdigs+6
+val.t0:	ldd			; transfer
+
+	ld	bc,sdigs
+	push	hl
+	or	a
+	sbc	hl,bc		; end of transfer?
+	pop	hl
+	jr	nz,val.t0
+
+	ld	a,'0'
+val.t1:	ld	(de),a		; leading zeroes inserted
+	dec	de
+
+	ld	hl,sdigs
+	or	a
+	sbc	hl,de		; end of transformation?
+	jr	nz,val.t1	; NO! then continue
+
+	xor	a
+	ld	(texp),a	; exponent is eliminated
+
+	pop	de
+
+val.g:	ld	a,(texp)
+	cp	7
+	jr	nc,fix.e	; scientific notation is required
+
+; Here we transfer the digits to the output string
+
+	ld	hl,sdigs	
+	ld	bc,7		; maximum moves
+	ldi			; transfer the sign
+
+; if the value is less than 1.0 then we display the leading zero 0.100
+
+	and	a		; need leading zero?
+	jr	nz,val.t	; NO! then skip it
+
+	ex	de,hl
+	ld	(hl),'0'	; insert a zero
+	inc	hl
+	jr	val.z
+
+val.t:	ldi			; transfer a character
+	dec	a
+	jr	nz,val.t	; repeat up to the decimal point
+
+	ex	de,hl
+val.z:	ld	(hl),'.'	; transfer a decimal point
+	inc	hl
+	ex	de,hl
+
+; if FIXSET is -1 then we branch to code that suppresses trailing zeroes
+;  and dangling decimal points.  Otherwise we must include the selected
+;  number of decimal places.
+
+	ld	a,(fixset)
+	cp	7		; set to 0-6?
+	jr	nc,suppss	; NO! then jump to perform suppressed form
+
+; now if FIXSET is 0 then no decimal places are required - we are done
+;  right now.
+
+	and	a		; fixset = 0?
+	jr	z,trunc		; YES! then done (drop decimal)
+
+	ld	a,b
+	or	c		; anything left to transfer?
+	ld	a,(fixset)
+	jr	z,fix.p		; NO! then done
+
+; transfer balance of digits up to FIXSET
+
+fix.t:	dec	a		; count down to FIXSET
+
+	ldi			; transfer a character
+	jp	po,fix.p	; jump if digits done
+
+	and	a		; done?
+	jr	nz,fix.t	; repeat up to FIXSET
+
+fix.p:	and	a		; FIXSET satisfied?
+	jp	z,rest0		; YES! then done
+
+; Now we check for width error caused by a FIXSET to great to format large
+;  numbers
+
+	cp	5		; 5 or 6 here spells trouble!
+	jr	c,fix.o		; NO! then continue
+
+	ld	a,4		; truncate FIXSET
+
+	ld	hl,flags
+	set	4,(hl)		; indicate format error
+
+fix.o:	ex	de,hl
+	ld	(hl),'0'	; fill with trailing zero
+	inc	hl
+	ex	de,hl
+
+	dec	a		; countdown to FIXSET
+	jr	fix.p
+
+; now scientific notation is required!  If FIXSET is not -1 then we set
+;  the Format Error flag before performing the conversion in notation.
+
+fix.e:	ld	a,(fixset)
+	cp	7		; set to 0-6?
+	jr	nc,sci0		; NO! then notation allowed
+
+	ld	hl,flags
+	set	4,(hl)		; indicate notation error
+	jr	sci0		; now convert notation
+
+; code transfers balance of value and truncates trailing zeroes and
+;  drops the dangling decimal point if necessary.
+
+suppss:	ld	a,b
+	or	c		; anything left to transfer?
+	jr	z,trunc		; NO! then no transfer
+
+	ldir			; transfer the balance
+
+; Now we drop trailing zeroes and the trailing decimal point if necessary
+
+trunc:	ex	de,hl
+val.l:	dec	hl		; pointer to last character
+	ld	a,(hl)		; obtain character
+	cp	'0'		; a zero?
+	jr	nz,val.d	; NO! then one more check
+
+	ld	(hl),' '	; overstrike with space
+	jr	val.l		; loop further back
+
+val.d:	cp	'.'		; no dangling decimal point
+	jp	nz,rest0	; NO! then done
+
+	ld	(hl),' '	; overstrike
+	jp	rest0		; done
+
+; **********
+; Subroutine: _sci
+; **********
+
+; Routine returns a 12 character ASCII string for the selected register.
+;  Reg.a defines the desired register.  Reg.hl specifies the
+;  destination address.  Format is scientific +0.00000E+00
+
+_sci:	push	hl		; save string destination address
+
+	call	savreg		; save registers
+	call	gdig		; extract significant digits and exponent
+
+	pop	hl
+	ex	(sp),hl		; string address
+	ex	de,hl
+
+; now format in scientific notation
+
+sci0:	ld	hl,sdigs	; sign and digits
+	ld	bc,2
+	ldir			; transfer sign and the first digit
+
+	ld	a,(sdigs+1)	; leading digit
+	cp	'0'		; zero? (then all are)
+	jr	z,sci.z		; YES! then do not adjust exponent
+
+	ld	a,(texp)
+	dec	a		; account for placement of decimal point
+	ld	(texp),a
+
+sci.z:	ld	a,'.'		; insert decimal point
+	ld	(de),a
+	inc	de
+
+	ld	bc,5
+	ldir			; transfer balance of digits
+
+	ex	de,hl
+
+; drop trailing zeroes
+
+	ld	b,4
+	ld	a,'0'
+sci.z1:	dec	hl
+	cp	(hl)		; zero?
+	jr	nz,sci.z0	; NO! then done
+	djnz	sci.z1
+
+sci.z0:	inc	hl
+	ld	(hl),'E'	; insert exponent
+	inc	hl
+
+	ld	a,(texp)	; obtain exponent
+	bit	7,a		; positive?
+	ld	a,'+'
+	jr	z,sci.e		; YES! then use plus sign
+
+	ld	a,(texp)
+	neg			; negate exponent
+	ld	(texp),a
+
+	ld	a,'-'
+sci.e:	ld	(hl),a
+	inc	hl
+
+; Now display the exponent as two decimal digits
+
+	ld	a,(texp)
+	ld	c,10		; tens digit
+	call	tdigit
+	ld	c,1		; units digit
+	call	tdigit
+	jp	rest0		; restore all registers
+
+tdigit:	ld	b,'0'-1
+
+tdig0:	inc	b
+	sub	c
+	jr	nc,tdig0
+
+	add	c
+	ld	(hl),b
+	inc	hl
+	ret
+
+; Routine multiplies fractional part of FP0 by two.
+
+mul.2:	ld	hl,fp0
+	ld	b,5
+	xor	a		; clear CY
+
+mul.t:	rl	(hl)
+	inc	hl
+	djnz	mul.t
+	ret
+
+; Routine extracts the sign and first six significant digits into a buffer.
+;  The power of ten exponent is also calculated and saved.  Reg. a defines
+;  the register of interest.
+
+gdig:	ld	hl,sdigs	; buffer for significant digits and sign
+	push	hl
+
+grot:	and	a		; FP0 has register of interest?
+	jr	z,grot0		; YES! then no roll up
+
+	call	_rollu		; get next register
+	dec	a		; countdown
+	jr	grot
+
+grot0:	ld	hl,texp		; variable used to acquire exponent
+	ld	(hl),0
+
+; First we check for FP zero.
+
+	ld	a,(fp0+4)	; exponent
+	and	a		; FP zero?
+	jr	nz,gdig0	; NO! then proceed to extract value
+
+; in the case of a FP zero we return zeroes.
+
+	pop	hl		; obtain digits buffer
+	ld	(hl),' '	; no sign
+	inc	hl
+
+	ld	b,6
+gzerf:	ld	(hl),'0'	; fill with zeros
+	inc	hl
+	djnz	gzerf
+
+	xor	a		; return Z set
+	ret
+
+; Now we determine the sign of the FP value and enter a '-' if necessary.
+
+gdig0:	ld	hl,fp0+3
+	bit	7,(hl)		; a negative value?
+	set	7,(hl)		; set bit as normalized
+
+	ld	a,' '
+	jr	z,dig.p		; NO! then do not enter a '-'
+
+	ld	a,'-'		; we insert a negative sign in the display
+dig.p:	ex	(sp),hl		; get display pointer
+	ld	(hl),a		; place sign
+	inc	hl		; bump pointer
+	ex	(sp),hl
+
+; Before we can extract the various significant digits we must determine the 
+;  base 10 exponent.  First if the value is less than 1.00 we multiply by
+;  10 until it is greater than one and count the multiplications.
+
+dig.c:	ld	a,(fp0+4)	; exponent
+	cp	05fh		; greater than 1.00E-10?
+	jr	nc,dig.c2	; YES! then no need to multiply
+
+	ld	hl,ten2
+	call	push
+	call	_mul		; multiply by 1.00E+10
+
+	ld	hl,texp
+	ld	a,(hl)
+	sub	10		; decrease exponent
+	ld	(hl),a
+	jr	dig.c
+
+dig.c2:	ld	a,(fp0+4)	; exponent
+	cp	081h		; greater than one?
+	jr	nc,dig.g	; YES! then no need to multiply
+
+	ld	hl,ten
+	call	push
+	call	_mul		; multiply by 10.00
+
+	ld	hl,texp
+	dec	(hl)		; decrease exponent
+	jr	dig.c2
+
+; Now the value is greater than 1.00, maybe it was originally, now we divide
+;  by 10.00s until the value is between 0.1 and 0.9 inclusive.
+
+dig.g:	ld	a,(fp0+4)	; exponent
+	cp	0b3h		; less than 1.00E-10?
+	jr	c,dig.g2	; YES! then we check next
+
+	ld	hl,ten2
+	call	push
+	call	_div		; divide by 1.00E+10
+
+	ld	hl,texp
+	ld	a,(hl)
+	add	10		; increase exponent
+	ld	(hl),a
+	jr	dig.g
+
+dig.g2:	ld	a,(fp0+4)	; exponent
+	cp	081h		; less than one?
+	jr	c,dig.r		; YES! then we are ready to obtain digits
+
+	ld	hl,ten
+	call	push
+	call	_div		; divide by ten
+
+	ld	hl,texp
+	inc	(hl)		; increase exponent
+	jr	dig.g2
+
+; Now we must perform some kind of rounding operation.  Here we must take
+;  FIXSET into account as it will dictate how many of the significant
+;  digits will be used.
+
+dig.r:	ld	a,(fixset)
+	cp	6		; set 0-5?
+	jr	nc,goro		; NO! then all digits used
+
+	ld	hl,texp
+	add	(hl)		; determine number of digits to be used
+
+goro:	ld	hl,fixr6	; 0.0000005 (default rounding)
+	cp	6		; valid number of digits?
+	jr	nc,noro		; NO! then round to default
+
+	ld	l,a		; convert to word
+	ld	h,0
+	add	hl,hl		; multiply by 4
+	add	hl,hl
+
+	ld	de,fixr		; address table
+	add	hl,de		; pointer to proper roundoff value
+
+noro:	call	push		; half of the least significant digit
+	call	_add		; added to value to perform round off
+
+; Now we need to check that we haven't exceeded one with the round off
+
+	ld	a,(fp0+4)	; exponent
+	cp	081h		; greater than one
+	jr	c,dig.m		; NO! then we may proceed
+
+	ld	hl,ten
+	call	push
+	call	_div		; divide by ten
+
+	ld	hl,texp
+	inc	(hl)		; increase exponent
+
+; Now scale mantissa to unity - so that we have the real decimal point
+;  just to the left of the most significant bit.
+
+dig.m:	ld	a,(fp0+4)	; exponent
+	cp	080h		; unity scale?
+	jr	z,dig.u
+
+; shift mantissa right to scale
+
+	ld	hl,fp0+3	; MSB of mantissa
+	ld	b,4		; mantissa and guard byte
+	xor	a		; clear CY
+
+dig.s:	rr	(hl)		; shift
+	dec	hl
+	djnz	dig.s
+
+	ld	hl,fp0+4	; address exponent
+	inc	(hl)		; adjust exponent
+	jr	dig.m		; repeat check
+
+; now generate the 6 most significant digits
+
+dig.u:	ld	c,6		; display six significant digits
+dig.l:	push	bc
+
+	xor	a
+	ld	(fp0+4),a	; clear MSB of FP0 (exponent discarded)
+
+	ld	hl,fp0+1
+	ld	de,fpy+1
+	ld	bc,4
+	ldir
+
+	call	mul.2
+	call	mul.2
+
+	ld	hl,fp0+1
+	ld	de,fpy+1
+	ld	b,4
+	xor	a		; clear CY
+
+dig.a:	ld	a,(de)
+	adc	(hl)
+	ld	(hl),a
+
+	inc	de
+	inc	hl
+	djnz	dig.a
+
+	call	mul.2
+
+	ld	a,(fp0+4)
+	add	'0'
+
+	pop	bc
+
+	ex	(sp),hl
+	ld	(hl),a
+	inc	hl
+	ex	(sp),hl
+
+	dec	c		; next digit?
+	jr	nz,dig.l	; YES! then loop
+
+	pop	hl		; discard digits pointer
+
+	or	1		; return NZ
+	ret			; value ready
+
+; constant FP values
+
+ten:	defb	000h,000h,020h,084h
+ten2:	defb	0f9h,002h,015h,0a2h
+
+; This table supplies roundoff constants (w/o sign)
+
+fixr:	defb	001h,000h,080h,080h	; 0.5000000
+	defb	0cdh,0cch,0cch,07ch	; 0.0500000
+	defb	00bh,0d7h,0a3h,079h	; 0.0050000
+	defb	06fh,012h,083h,076h	; 0.0005000
+	defb	018h,0b7h,0d1h,072h	; 0.0000500
+	defb	0adh,0c5h,0a7h,06fh	; 0.0000050
+fixr6:	defb	0beh,037h,086h,06ch	; 0.0000005
+
+; ***************************************************************************
+; 			Main Mathematical Routines
+; ***************************************************************************
+
+; **********
+; Subroutine: _sub
+; **********
+
+; Routine removes FP0 and FP1 from the stack, calculates FP1-FP0 and returns
+;  the result to the stack.
+
+; We perform the subtraction by changing the sign of FP0 and proceeding with
+;  an addition.
+
+_sub:	call	savex		; remember last x
+
+	call	_chs		; change the sign of FP0
+	jr	add.g		; now perform the addition
+
+; **********
+; Subroutine: _add
+; **********
+
+; Routine removes FP0 and FP1 values from the stack, calculates the sum
+;  and returns that to the stack.
+
+_add:	call	savex		; remembers last x
+
+; ADD GO
+; Here we begin the addition.  Note that this is an entry point for _SUB.
+;  Both FP0 and FP1 are normalized FP values with their signs encoded
+;  in the MSB of the mantissa.  Here we decode the signs and save them
+;  for later use.  The MSB bit 7 of the mantissa is set to 1 as required
+;  for normalized values.  The mantissa of FP0 is extended to 32 bits to
+;  preserve accuracy by the guard byte.
+
+add.g:	ld	a,(fp0+4)
+	and	a		; zero?
+	jp	z,pop		; YES! then return value in FP1
+
+	ld	a,(fp1+4)
+	and	a		; zero?
+	jp	z,discard	; YES! then return value in FP0
+
+	ld	hl,fp0+3
+	ld	a,(hl)
+	and	080h		; obtain sign of FP0
+	ld	(sign0),a
+
+	set	7,(hl)		; sets MSB bit 7 to one
+
+	ld	hl,fp1+3
+	ld	a,(hl)
+	and	080h		; obtain sign of FP1
+	ld	(sign1),a
+
+	set	7,(hl)		; sets MSB bit 7 to one
+
+	xor	a
+	ld	(fp0),a		; initialize the guard bytes
+	ld	(fp1),a
+
+; ADD LOOP
+; Here we loop until both exponents are equal.  The smaller value is shifted
+;  to achieve this equality.
+
+add.l:	ld	hl,fp0+4	; address FP0's exponent
+	ld	a,(fp1+4)	; obtain FP1's exponent
+	cp	(hl)		; are exponents equal?
+	jr	z,add.f		; YES! then we can perform the addition
+	jr	nc,add.ln	; FP1>FP0 then no swap
+
+; We want the smaller value in FP0 so that it is shifted.
+
+	call	_swap		; swap FP0 and FP1
+
+	ld	hl,sign0 	; exchange signs
+	ld	c,(hl)
+	ld	a,(sign1)
+	ld	(hl),a
+	ld	a,c
+	ld	(sign1),a
+
+; Now we scale the fractional part of FP0 by 1/2 and increase its exponent by
+;  1.  The value remains unchanged, however, we need to get the exponents of
+;  both FP0 and FP1 to be identical in order to perform the addition.
+
+add.ln:	ld	hl,fp0+3	; MSB of mantissa
+	ld	b,4		; three bytes and the guard byte
+	xor	a		; clear CY
+
+; ADD SHIFT
+; Perform shift through the mantissa
+
+add.s:	rr	(hl)		; divide by two (CY gets bit 0)
+	dec	hl		; to next byte
+	djnz	add.s		; complete shift through mantissa
+
+	ld	hl,fp0+4	; address exponent
+	inc	(hl)		; increased
+
+; If the mantissa of the smaller value becomes 0 then the result of the
+;  addition is the larger FP value unchanged.  We check here for a zero
+;  mantissa
+
+	ld	hl,fp0+3
+	ld	b,4		; mantissa and guard byte
+	xor	a		; clear test register
+
+; ADD ZERO
+; Loop and check for zero mantissa
+
+add.z:	add	(hl)		; non-zero mantissa?
+	jr	nz,add.l	; YES! then continue will exponent check
+
+	dec	hl		; to next byte
+	djnz	add.z		; check next byte in mantissa
+
+; The smaller FP value causes an insignificant change to the larger value.
+;  We return the larger value as our result.  First we restore the sign
+;  in FP1 (larger value).
+
+	ld	hl,fp1+3	; mantissa MSB
+	ld	a,(sign1)	; sign of FP1
+	res	7,(hl)		; ready to receive sign
+	or	(hl)		; encode sign
+	ld	(hl),a		; placed back in FP1
+
+	jp	pop		; discard FP0 and return
+
+; ADD FRACTIONS
+; Now perform mantissa addition.  This proceeds differently if the signs of
+;  FP0 and FP1 are not the same.
+
+add.f:	ld	hl,sign0	; address sign of FP0
+	ld	a,(sign1)	; get sign of FP1
+	xor	(hl)		; are signs different?
+	jr	nz,add.d	; YES! then process accordingly
+
+; Here we add the mantissas
+
+	ld	hl,fp0
+	ld	de,fp1
+	ld	b,4		; length of mantissa
+	xor	a		; clear CY
+
+; ADD TOTAL
+; loop adds mantissas
+
+add.t:	ld	a,(de)		; byte from FP1
+	inc	de
+
+	adc	(hl)		; add byte from FP0
+	ld	(hl),a		; result goes in FP0
+	inc	hl		; next byte
+	djnz	add.t
+	jr	nc,add.r	; no carry then we need only round off
+
+; Now we scale the fractional part of FP0 by 1/2 and increase its exponent by
+;  1.  The value remains unchanged.
+
+	ld	hl,fp0+3	; MSB of mantissa
+	ld	b,4		; three bytes and the guard byte
+	xor	a		; clear CY
+
+; ADD SHIFT
+; Perform shift through the mantissa
+
+add.s2:	rr	(hl)		; divide by two (CY gets bit 0)
+	dec	hl		; to next byte
+	djnz	add.s2		; complete shift through mantissa
+
+	ld	hl,fp0+4	; address exponent
+	inc	(hl)		; increased
+	jr	z,add.o		; if zero then overflow has occured
+	
+; ADD ROUND
+; Discard FP1 and check for round off
+
+add.r:	call	discard		; drop FP1
+	jp	round		; perform rounding and return
+
+; ADD DIFFERENT
+; Perform addition of values with differing signs
+
+add.d:	ld	hl,fp1
+	ld	de,fp0
+	ld	b,4		; length of mantissa
+	xor	a		; clear CY
+
+; loop subtracts mantissas
+
+add.d0:	ld	a,(de)		; byte from FP0
+	sbc	(hl)		; sub byte from FP1
+	ld	(de),a		; result goes in FP0
+	inc	de		; next bytes
+	inc	hl
+	djnz	add.d0
+	jr	nc,add.d1	; no borrow then we do not negate
+
+; here we must negate the result
+
+	ld	hl,fp0		; address FP0
+	ld	b,4		; includes guard byte
+	xor	a		; clear CY
+
+add.dn:	ld	a,0
+	sbc	(hl)		; negate
+	ld	(hl),a		; result placed back in FP0
+	inc	hl		; next byte
+	djnz	add.dn		; loop
+
+	ld	hl,sign0
+	ld	a,80h
+	xor	(hl)		; flip the sign
+	ld	(hl),a
+
+; Here we discard FP1 and check for a zero result
+
+add.d1:	call	discard		; drop FP1
+	jp	norm		; normalize and return
+
+; Here overflow has occured.
+
+add.o:	call	discard		; drop FP1
+	jp	oflow		; report overflow
+
+; **********
+; Subroutine: _mul
+; **********
+
+; Routine removes FP0 and FP1 from the stack, calculates their product and
+;  returns the result to the stack.
+
+_mul:	call	savex
+
+; check for zeros
+
+	ld	a,(fp0+4)
+	and	a		; zero?
+	jr	z,mul.uf	; YES! then result is zero
+
+	ld	a,(fp1+4)
+	and	a		; zero?
+	jr	z,mul.uf	; YES! then result is zero
+
+; obtain the sign of the result by exclusive-or
+
+	ld	hl,fp1+3	; mantissa MSB
+	ld	a,(fp0+3)	; mantissa MSB
+	xor	(hl)
+	and	080h		; mask only the sign
+	ld	(sign0),a	; saved here
+
+	set	7,(hl)		; set for normalized value
+
+	ld	hl,fp0+3
+	set	7,(hl)		; set for normalized value
+
+; FP0 becomes the multiplicand and is copied to FPY
+
+	ld	hl,fp0
+	ld	de,fpy
+	ld	bc,5
+	ldir
+
+; obtain exponent of result by adding the two exponents
+
+	ld	hl,fp0+4	; exponent of FP0
+	ld	a,(fp1+4)	; exponent of FP1
+	add	(hl)		; added together
+
+; Now we need to detect overflow and underflow situations.  Since we are in
+;  excess 128 notation we'll need to adjust this sum by 128 before using
+;  it in our result.  First we check for carry.  A carry here does not
+;  necessarily mean that we have overflowed, however, if there was a carry
+;  and the most significant bit is set then we have an overflow.
+
+	jr	nc,mul.u	; not overflow - go check underflow
+	bit	7,a		; overflow?
+	jr	nz,mul.o	; YES! then report overflow
+	jr	mul.p		; otherwise proceed with product
+
+; Here we check for underflow.  There hasn't been a carry and if the most
+;  significant bit of the sum is not set then there has been an underflow.
+
+mul.u:	bit	7,a		; underflow?
+	jr	nz,mul.p	; NO! then proceed with product
+
+; underflow has occured
+
+mul.uf:	call	_clx		; we return 0.000 on underflow
+	jp	discard		; discards FP1 before returning
+
+mul.p:	add	128		; offset to adjust for notation
+	ld	(hl),a		; placed here in result
+
+; Now we proceed to perform the multiplication of mantissas using the
+;  partial product method.  First we zero the result accumulator.
+;  Remember that the multiplicand is in FPY.
+
+	ld	hl,fp0		; 32 bit result
+	ld	de,fp0+1
+	ld	bc,3
+	ld	(hl),0
+	ldir
+
+	ld	c,24		; loop for 24 bits of multiplier mantissa
+
+; Rotate multiplier right to obtain bit
+
+mul.l:	ld	hl,fp1+3	; address MSB of multiplier
+	ld	b,3		; size of mantissa
+	xor	a		; clear CY
+
+mul.s:	rr	(hl)		; rotate
+	dec	hl
+	djnz	mul.s
+	jr	nc,mul.n	; NO CY! - do not add multiplicand
+
+; Now add the multiplicand to the result
+
+	ld	hl,fp0+1
+	ld	de,fpy+1
+	ld	b,3		; just the mantissa
+	xor	a		; clear CY
+
+mul.a:	ld	a,(de)		; byte from FP1
+	inc	de
+
+	adc	(hl)		; add from FP0
+	ld	(hl),a		; result placed back here
+	inc	hl
+	djnz	mul.a		; loop
+
+; Now we shift the result right 1 bit to process the next part of the product.
+;  Note that we preserve the state of the CY from the addition above.  If the
+;  addition was bypassed then CY is clear already.
+
+mul.n:	ld	hl,fp0+3	; MSB of result
+	ld	b,4		; mantissa and guard byte
+
+mul.c:	rr	(hl)		; rotate
+	dec	hl
+	djnz	mul.c
+
+	dec	c		; next multiplier bit?
+	jr	nz,mul.l	; YES! then continue to loop
+
+; Here we discard FP1 and test for zero mantissa in the result
+
+	call	discard		; drop FP1
+	jp	norm		; normalize and return
+
+; Here overflow has occured.
+
+mul.o:	call	discard		; drop FP1
+	jp	oflow		; report overflow
+
+; **********
+; Subroutine: _div
+; **********
+
+; Routine removes FP0 and FP1 from the stack, calculates FP1/FP0 and returns
+;  the result to the stack.
+
+_div:	call	savex
+
+; check for zeros
+
+	ld	a,(fp1+4)
+	and	a		; zero?
+	jp	z,pop		; YES! then return zero
+
+	ld	a,(fp0+4)
+	and	a		; zero?
+	jr	nz,div0		; NO! then perform division
+
+; Report Divide by Zero Error
+
+	ld	hl,flags
+	set	1,(hl)		; set divide by zero flag
+	ret
+
+; obtain the sign of the result by exclusive-or
+
+div0:	ld	hl,fp1+3	; mantissa MSB
+	ld	a,(fp0+3)	; mantissa MSB
+	xor	(hl)
+	and	080h		; mask only the sign
+	ld	(sign0),a	; saved here
+
+	set	7,(hl)		; set for normalized value
+
+	ld	hl,fp0+3
+	set	7,(hl)		; set for normalized value
+
+; FP0 becomes the divisor and is copied to FPY.
+
+	ld	hl,fp0
+	ld	de,fpy
+	ld	bc,5
+	ldir
+
+; obtain exponent of result by subtracting the two exponents
+
+	ld	hl,fp0+4	; exponent of FP0
+	ld	a,(fp1+4)	; exponent of FP1
+	sub	(hl)		; subtacted
+
+; Now we need to detect overflow and underflow situations.  Since we are in
+;  excess 128 notation we'll need to adjust this by 128 before using
+;  it in our result.  First we check for carry.  A no carry here does not
+;  necessarily mean that we have overflowed, however, if there wasn't a carry
+;  and the most significant bit is set then we have an overflow.
+
+	jr	c,div.u		; not overflow - go check underflow
+	bit	7,a		; overflow?
+	jr	nz,div.o	; YES! then report overflow
+	jr	div.p		; otherwise proceed with division
+
+; Here we check for underflow.  There hasn't been a carry and if the most
+;  significant bit of the sum is not set then there has been an underflow.
+
+div.u:	bit	7,a		; underflow?
+	jr	nz,div.p	; NO! then proceed with product
+
+; underflow has occured
+
+	call	_clx		; we return 0.000 on underflow
+	jr	discard		; discards FP1 before returning
+
+div.p:	add	129		; adjust for notation and division
+	jr	z,div.o		; overflow? then report it!
+
+	ld	(hl),a		; placed here in result
+
+; Now unlike multiplication, we cannot permit division by 0.  This is an
+;  overflow condition that we must check for.
+
+	ld	a,(fpy+4)	; obtain exponent
+	and	a		; FP zero?
+	jr	z,div.o		; YES! then report overflow!
+
+; If the dividend is zero then the result is trivial.
+
+	ld	a,(fp1+4)	; obtain exponent of dividend
+	and	a		; FP zero?
+	jr	z,div.z		; YES! then return FP zero for a result
+
+; now we process each of 32 bits in the divisor.  The FPY guard byte is used
+;  and is initialized here also.  Note that there is no need to
+;  initialize the mantissa of the quotient since we will rotate in an
+;  entirely new mantissa in the following loop.
+
+	xor	a
+	ld	(fpy),a		; initialize FPY guard
+	ld	(fpy+4),a	; not used as exponent here
+	ld	(fp1+4),a	; also not exponent
+
+	ld	c,32		; set bit count
+
+; The first order of business in this loop is to compare the divisor and
+;  the dividend.  If the dividend is large than the divisor we subrtact
+;  the divisor from it and rotate a 1 into the quotient.
+
+div.l:	ld	de,fp1+4	; MSB of dividend
+	ld	hl,fpy+4	; MSB of divisor
+	ld	b,5		; four bytes of mantissa and the guard byte
+
+div.c:	ld	a,(de)		; byte from dividend
+	cp	(hl)		; divisor > dividend?
+	jr	c,div.n		; YES! then skip subtraction
+	jr	nz,div.g	; divisor < dividend then proceed
+
+	dec	de
+	dec	hl
+	djnz	div.c		; repeat
+
+; Now we must subtract the divisor from the dividend to create the dividend 
+;  for the next cycle of the loop.  Note CY is already clear.
+
+div.g:	ld	de,fp1		; dividend
+	ld	hl,fpy		; divisor
+	ld	b,5		; long mantissa and guard byte
+
+div.a:	ld	a,(de)		; dividend
+	sbc	(hl)		; minus divisor
+	ld	(de),a		; new dividend
+	inc	de
+	inc	hl
+	djnz	div.a		; repeat
+
+; Now we rotate in the result of this portion of the division.  The carry
+;  flag is complemented so that it is 1 if dividend > divisor and we had
+;  performed the subtraction.
+
+div.n:	ld	hl,fp0		; LSB of quotient
+	ld	b,4		; includes guard byte
+	ccf			; complement CY
+
+div.q:	rl	(hl)		; rotate in CY
+	inc	hl		; next byte
+	djnz	div.q		; repeat
+
+; We shift dividend left
+
+	ld	hl,fp1		; LSB of mantissa
+	ld	b,5		; includes the guard byte
+	xor	a		; clear CY
+
+div.s:	rl	(hl)		; rotate
+	inc	hl
+	djnz	div.s		; repeat
+
+; Loop to next bit
+
+	dec	c		; another bit to process?
+	jr	nz,div.l	; YES! then continue back through loop
+
+; Now discard FP1 and Normalize
+
+	call	discard		; drop FP1
+	jr	norm		; Normalize and return
+
+; We return FP zero
+
+div.z:	call	_clx		; FP zero
+	jr	discard		; discard FP1 and return
+
+; Here overflow has occured.
+
+div.o:	call	discard		; drop FP1
+	jr	oflow		; report overflow
+
+; Routine performs POP to discard FP1.  FP0 is undisturbed.
+
+discard:
+	ld	hl,fp1+5	; source
+	ld	de,fp1		; destination
+	ld	bc,5*(numreg-2)	; 2 full registers are moved
+	ldir			; copy
+	ret	    		; we are done.
+
+; Normalizes FP0
+
+norm:	ld	hl,fp0+3
+	ld	b,4
+	xor	a
+
+norm0:	add	(hl)
+	jr	nz,norm1	; nonzero so continue normalization
+	dec	hl		; next byte
+	djnz	norm0
+	jp	_clx		; return FP zero
+
+norm1:	ld	a,(fp0+3)	; get MSB of mantissa
+	and	080h		; normalized?
+	jr	nz,round	; YES! then complete by checking round up
+
+	ld	hl,fp0
+	ld	b,4		; mantissa and guard byte
+	xor	a		; clear CY
+
+norm2:	rl	(hl)
+	inc	hl
+	djnz	norm2
+
+	dec	(hl)		; decrement the exponent
+	jr	nz,norm1	; continue normalization
+	jp	_clx		; return FP zero for underflow
+
+; Performs round off check for 32 FP0 mantissa
+
+round:	ld	hl,fp0		; address guard byte
+	bit	7,(hl)		; need round up?
+	jr	z,sign		; NO! then go finish up
+
+; Now we increment the mantissa
+
+	ld	hl,fp0+1
+	ld	b,3		; length of mantissa
+	scf			; set CY
+
+; loop increments mantissa
+
+round0:	ld	a,0		; just adds CY
+	adc	(hl)		; add byte from FP0
+	ld	(hl),a		; result goes in FP0
+	jr	nc,sign		; no carry then we need only finish up
+
+	inc	hl		; next byte
+	djnz	round0
+
+; Now we scale the fractional part of FP0 by 1/2 and increase its exponent by
+;  1.  The value remains unchanged.
+
+	ld	hl,fp0+3	; MSB of mantissa
+	ld	b,3		; three bytes
+	xor	a		; clear CY
+
+; Perform shift through the mantissa
+
+round1:	rr	(hl)		; divide by two (CY gets bit 0)
+	dec	hl		; to next byte
+	djnz	round1		; complete shift through mantissa
+
+	ld	hl,fp0+4	; address exponent
+	inc	(hl)		; increased
+	jr	nz,sign		; no overflow - then just process sign
+
+; Routine return large value and reports overflow
+
+oflow:	ld	hl,fp0+1
+	ld	de,fp0+2
+	ld	bc,3
+	ld	(hl),0ffh
+	ldir			; loads a very large number
+
+; now set the overflow flag
+
+	ld	hl,flags
+	set	0,(hl)
+
+; the returned value does take the correct sign
+
+; Routine encodes the sign for FP0
+
+sign:	ld	hl,fp0+3	; mantissa MSB
+	ld	a,(sign0)	; sign of FP0
+	res	7,(hl)		; ready to receive sign
+	or	(hl)		; encode sign
+	ld	(hl),a		; placed back in FP0
+	ret			; done
+
+; **********
+; Subroutine: _int
+; **********
+
+; Routine takes the integer part of FP0
+
+_int:	ld	a,(fp0+4)	; obtain the exponent
+	cp	081h		; value less than 1?
+	jp	c,_clx		; YES! then return FP zero
+	cp	099h		; value too large to have fractional part?
+	ret	nc		; YES! then return unchanged
+
+; extract sign
+
+	ld	hl,fp0+3
+	ld	a,(hl)
+	set	7,(hl)		; matissa bit set
+	and	080h
+	ld	(sign0),a
+
+; Now we scale the fractional part of FP0 by 1/2 and increase its exponent by
+;  1.  We do this until the exponent is 098h then the mantissa is the
+;  integer part.  All fractional bits are lost
+
+intc:	ld	a,(fp0+4)	; obtain exponent
+	cp	098h		; scaled properly?
+	jr	z,intr		; YES! then we have the integer part
+
+	ld	hl,fp0+3	; MSB of mantissa
+	ld	b,3		; three bytes
+	xor	a		; clear CY
+
+; Perform shift through the mantissa
+
+ints:	rr	(hl)		; divide by two (CY gets bit 0)
+	dec	hl		; to next byte
+	djnz	ints		; complete shift through mantissa
+
+	ld	hl,fp0+4	; address exponent
+	inc	(hl)		; increased
+	jr	intc		; repeat
+
+; now normalize the register and return
+
+intr:	xor	a
+	ld	(fp0),a		; guard byte zero to drop fractional part
+	jp	norm
+
+; **********
+; Subroutine: _abs
+; **********
+
+; ABS Function
+
+_abs:	ld	hl,fp0+3	; address MSB of mantissa
+	res	7,(hl)		; forced positive!
+	ret
+
+; **********
+; Subroutine: _atn
+; **********
+
+; ATN Function
+
+_atn:	call	savreg		; save registers
+
+	ld	a,(fp0+3)	; get sign of value
+	and	080h		; test sign - negative?
+	jr	z,atn0		; NO! then no need to negate
+
+	call	_chs		; change sign
+	call	atn0		; calculate ATN(-X)
+	jp	_chs		; negate before returning
+
+atn0:	ld	a,(fp0+4)	; get exponent of value
+	cp	081h		; greater than 1?
+	jr	c,atn1		; NO then jump and perform series approx.
+
+; take inverse
+
+	ld	hl,one
+	call	push
+	call	_swap
+	call	_div		; 1/X
+
+	call	atn1		; calculate series approximation
+
+; after series will deduct from Pi over 2
+
+	ld	hl,halfpi
+	call	push
+	call	_swap
+	jp	_sub		; subtract and return
+
+; perform series approximation to ATN()
+
+atn1:	ld	hl,atntbl	; table of arctangent coefficients
+	jp	series		; calculate series
+
+; arctangent series data table
+
+atntbl: defb	9		; ARCTANGENT
+
+	defb	04ah,0d7h,03bh,078h	; +.00286623
+	defb	002h,06eh,084h,07bh	; -.01616574
+	defb	0feh,0c1h,02fh,07ch	; +.04290961
+	defb	074h,031h,09ah,07dh	; -.07528964
+	defb	084h,03dh,05ah,07dh	; +.10656265
+	defb	0c8h,07fh,091h,07eh	; -.14208901
+	defb	0e4h,0bbh,04ch,07eh	; +.19993550
+	defb	06ch,0aah,0aah,07fh	; -.33333146
+	defb	000h,000h,000h,081h	; +1.0000000
+
+; **********
+; Subroutine: _tan
+; **********
+
+; TAN Function
+;  Implemented as SIN(x)/COS(x)
+
+_tan:	call	savreg
+	call	_enter		; need an extra copy of X
+	call	_sin		; SIN(x)
+	call	_swap		; retrieve X
+	call	_cos		; COS(x)
+	jp	_div		; return SIN(x)/COS(x)
+
+; **********
+; Subroutine: _cos
+; **********
+
+; COS Function
+
+_cos:	call	savreg
+
+	ld	hl,halfpi	; pi over two to convert to SIN
+	call	push
+	call	_add
+
+; **********
+; Subroutine: _sin
+; **********
+
+; SIN Function
+
+_sin:	call	savreg
+
+	ld	hl,twopi
+	call	push
+	call	_div		; X /= (2*Pi)
+
+	call	_enter		; retain copy of X
+	call	_int
+	call	_sub		; retain only the fractional part
+
+	ld	hl,ahalf	; 0.50000
+	call	push
+	call	_sub		; X -= 0.50
+
+	ld	a,(fp0+3)	; get MSB of mantissa
+	and	080h		; extract sign
+	push	af
+	call	z,_chs
+
+	ld	hl,aforth	; 0.250000
+	call	push
+	call	_add		; X += 0.35
+
+	ld	a,(fp0+3)	; obtain MSB of mantissa
+	and	080h		; check sign
+	call	z,_chs		; negat the value if positive
+
+	ld	hl,aforth	; 0.2500000
+	call	push
+	call	_add		; X += 0.25
+
+	pop	af
+	call	z,_chs		; negate again if required
+
+	ld	hl,sintbl	; table of SIN series coefficients
+	jp	series		; calculate series
+
+halfpi: defb	0dbh,00fh,049h,081h	; 1.5707964, cos(x)=sin(x+1.5708)
+aforth: defb	000h,000h,000h,07fh	; 0.2500000
+
+; sine series data table
+
+sintbl: defb	5
+
+	defb	0bah,0d7h,01eh,086h	; +39.71067
+	defb	064h,026h,099h,087h	; -76.574981
+	defb	058h,034h,023h,087h	; +81.602233
+	defb	0e0h,05dh,0a5h,086h	; -41.341675
+twopi:	defb	0dah,00fh,049h,083h	; +6.283185, twice Pi
+
+; **********
+; Subroutine: _sqrt
+; **********
+
+; Take the Square Root of X
+
+_sqrt:	call	savreg
+
+	ld	hl,ahalf
+	call	push
+	jr	ytox$
+
+; **********
+; Subroutine: _ytox
+; **********
+
+; Y^X Any base to any exponent function
+;  uses:  Y^X = exp( X * ln(Y) )
+
+_ytox:	ld	hl,discard
+	push	hl		; set to discard after calculation
+
+ytox$:	call	savreg
+
+	ld	a,(fp1+4)	; exponent of Y
+	and	a		; Y=0?
+	jr	nz,ytox1	; NO! then continue
+
+	ld	a,(fp0+4)	; exponent of X
+	and	a		; X=0?
+	jr	z,ytox0		; YES! then report error
+
+	ld	a,(fp0+3)	; MSB of X mantissa
+	and	080h		; test sign - negative?
+	jr	nz,ytox0	; YES! then report error
+
+; otherwise the result is zero
+
+	call	discard
+	jp	_clx
+
+; Report Divide by Zero Error
+
+ytox0:	ld	hl,flags
+	set	1,(hl)		; set divide by zero flag
+	ret
+
+ytox1:	ld	a,(fp0+4)	; exponent of X
+	and	a		; X=0?
+	jr	nz,ytox2	; NO! then proceed to calculate
+
+; Y^0 returns 1.000 always
+
+	call	pop		; discard X
+	call	pop		; discard Y
+
+	ld	hl,one
+	jp	push		; returns 1.000
+
+; Now we must calculate using natural logarithms
+
+ytox2:	ld	a,(fp1+3)	; MSB of Y mantissa
+	and	080h		; test sign - positive?
+	jr	z,ytox3		; YES! then take LN() without sign inversion
+
+; now since the base is negative we must have an integer exponent or the
+;  operation is illegal
+
+	call	_enter
+	call	_int
+
+; compare X to int(X)
+
+	ld	hl,fp0+4
+	ld	de,fp1+4
+	ld	b,4		; exponent and three mantissa bytes
+
+ytoxl:	ld	a,(de)
+	cp	(hl)
+	jr	nz,ytoxb	; Bad operation if not integer
+
+	dec	hl
+	dec	de
+	djnz	ytoxl		; repeat through value
+
+	call	pop		; discard integer copy of X
+	call	_ftoi
+	ld	a,l		; obtain least significant byte
+	rra			; move least significant bit to CY
+	push	af		; save state even or odd
+
+; here we negate Y before taking the LN()
+
+	call	_swap		; exchange Y and X to operate on Y first
+	call	_chs		; -Y
+	call	_ln		; ln(-Y)
+	call	_mul		; X*(ln(-Y))
+	call	_exp		; exp(X*ln(-Y))
+
+	pop	af		; exponent odd?
+	call	c,_chs		; YES! then negate result
+	ret
+
+ytoxb:	call	pop		; discard integer copy of X
+	jp	badfn		; report illegal operation
+
+ytox3:	call	_swap		; exchange Y and X to operate on Y first
+	call	_ln		; take ln(Y)
+	call	_mul		; calculate X*ln(Y)
+
+; **********
+; Subroutine: _exp
+; **********
+
+; EXP(X) Exponential function
+
+_exp:	call	savreg
+	call	_enter		; save value
+
+; scale X to range for best fit using the following rule:
+;	exp(x) = 2^c * exp( x - c*ln(2) )   where c = 1 + int( x/ln(2) )
+
+	ld	hl,econs0	; 1.442695
+	call	push
+	call	_mul		; multiply
+
+	ld	a,(fp0+4)	; exponent of FP0
+	cp	088h		; check max
+	jr	nc,expof	; overflow
+
+	call	_int		; take integer part
+
+	call	_ftoi		; obtain integer value in reg.hl
+	ld	a,l
+	add	080h		; adjust to excess 128 notation
+	add	2
+	jr	c,expof
+	
+	push	af		; save value
+
+	ld	hl,one		; 1.00000
+	call	push
+	call	_add
+
+	ld	hl,cons0	; 0.693147
+	call	push
+	call	_mul
+
+	call	_sub
+	call	_chs
+
+	ld	hl,exptbl	; table of coeficients for approximation
+	call	poly		; calculate polynomial
+
+; create scaling factor
+
+	call	_enter
+	call	_clx
+
+	pop	af
+	ld	(fp0+4),a	; .5 * 2^(c+2)
+	jp	_mul		; multiply and return
+
+expof:	call	pop  		; reset stack
+	jp	oflow
+
+econs0:	defb	03bh,0aah,038h,081h	; 1.44270   1/ln(2)
+
+; exponential function series data table
+
+exptbl: defb	8		; EXP function coefficients
+
+	defb	040h,02eh,094h,074h	; -0.00014132
+	defb	070h,04fh,02eh,077h	; +0.00132988
+	defb	06eh,002h,088h,07ah	; -0.00830136
+	defb	0e6h,0a0h,02ah,07ch	; +0.04165735
+	defb	050h,0aah,0aah,07eh	; -0.16666532
+	defb	0ffh,0ffh,07fh,07fh	; +0.49999997
+	defb	000h,000h,080h,081h	; -1.00000000
+	defb	000h,000h,000h,081h	; +1.00000000
+
+; **********
+; Subroutine: _ln
+; **********
+
+; Calculate the Natural Logarithm of FP0
+
+_ln:	call	savreg
+
+	ld	a,(fp0+4)
+	and	a		; zero?
+	jp	z,badfn		; YES! then Illegal Function
+
+	ld	a,(fp0+3)	; get sign of the value
+	and	80h
+	jp	nz,badfn	; NEGATIVE! - Illegal Function
+
+	ld	hl,fp0+4	; address exponent
+	ld	a,(hl)		; fetch the exponent
+	ld	(hl),080h	; scale value to 0.5 - 1.0
+
+	sub	080h		; obtain scaling
+	push	af		; save integer scaling value
+
+	ld	hl,cons1
+	call	push		; load 0.707107   sqrt(1/2)
+	call	_add		; add to value
+
+	ld	hl,cons2	; load 1.414214   sqrt(2)
+	call	push
+	call	_swap
+	call	_div		; divide
+
+	ld	hl,one		; 1.00000
+	call	push
+	call	_swap
+	call	_sub		; subtract
+
+	ld	hl,natlog	; natural log series coeficients
+	call	series		; calculate series
+
+	ld	hl,ahalf
+	call	push		; load 0.50000
+	call	_sub
+
+	pop	af		; retrieve scaling
+	call	_btof		; load to FP0
+	call	_add
+
+	ld	hl,cons0
+	call	push
+	jp	_mul		; multiply by 0.6931478 and return
+
+one:	defb	000h,000h,000h,081h	; +1.00000
+ahalf:	defb	000h,000h,000h,080h	; 0.500000
+cons0:	defb	018h,072h,031h,080h	; 0.693147  ln(1/2)
+cons1:	defb	0f3h,004h,035h,080h	; 0.707107  sqrt(1/2)
+cons2:	defb	0f3h,004h,035h,081h	; 1.414214  sqrt(2)
+
+; coefficients for natural log approximation
+
+natlog: defb	3		; three FP array
+
+	defb	0aah,056h,019h,080h	; +0.598979
+	defb	0f1h,022h,076h,080h	; +0.961471
+	defb	045h,0aah,038h,082h	; +2.885392
+
+; calculate the series
+;	f(x) = x * p(x^2)
+;	HL contains address of coefficients
+
+; square the value
+
+series:	push	hl		; save address to coefficients
+	call	_enter		; duplicate FP0 twice
+	call	_enter
+	call	_mul		; multiply
+
+	pop	hl		; retrieve address
+	call	poly		; obtain value for polynomial
+	jp	_mul		; multiply by FP0 and return
+
+; calculates the polynomial expression
+;	p(x) = a0*x^(n) + a1*x^(n-1) + a2*x^(n-2) + ... + a(n)
+;	where n is the number of coefficients
+
+poly:	push	hl		; save pointer
+	call	savez		; save X
+	call	pop		; discard
+
+	pop	hl		; retrieve pointer
+	ld	b,(hl)		; get number of coefficients
+	inc	hl		; advance to first coefficient
+	push	bc
+
+	call	push		; load coefficient from (reg.hl) into acc
+
+poly0:	pop	bc		; retrieve count
+	dec	b		; countdown coefficients used - done?
+	ret	z		; YES! then return
+
+	push	bc		; save counter
+	push	hl		; save pointer
+	call	loadz		; retrieve X
+	call	_mul		; multiply
+
+	pop	hl		; retrieve pointer
+	call	push		; obtain coefficient from (reg.hl)
+
+	push	hl		; save address
+	call	_add		; add registers to Fp acc
+
+	pop	hl		; retrieve pointer
+	jr	poly0		; repeat
+
+; Reports Illegal Operation
+
+badfn:	ld	hl,flags
+	set	2,(hl)		; Bad Function 
+	ret
+
+; ***************************************************************************
+; 			   Internal Utility Routines
+; ***************************************************************************
+
+; Routine enters the value addressed by reg.hl.  The registers are pushed
+;  down and FP0 is loaded.
+
+push:	push	hl		; save address of value to be entered
+
+	ld	hl,fpx-6	; source
+	ld	de,fpx-1	; destination
+	ld	bc,5*(numreg-1)	; full registers are moved
+	lddr			; copy proceeds in reverse direction
+
+	pop	hl
+	ld	de,fp0+1	; address register FP0
+	ld	bc,4		; move FP value
+	ldir
+	ret			; FP0 entered
+
+; Routine performs a POP on the registers.  All registers move up and
+;  FP3 is duplicated.
+
+pop:	ld	hl,fp1		; source
+	ld	de,fp0		; destination
+	ld	bc,5*(numreg-1)	; full registers are moved
+	ldir			; copy
+	ret			; registers poped
+
+; Routine saves value of accumulator
+
+savex:	ld	hl,fp0
+	ld	de,fpx
+	ld	bc,5
+	ldir			; copy FP0 to FPX
+	ret
+
+; Routine loads FPZ from FP0
+
+savez:	ld	hl,fp0
+	ld	de,fpz
+	ld	bc,5
+	ldir			; copy FP0 to FPX
+	ret
+
+; Routine pushes FPZ onto the stack
+
+loadz:	ld	hl,fpz+1
+	jr	push
+
+; Routine saves register set to free registers for internal use.  This occurs
+;  only on the initial call to this routine.  A flag is set to prevent
+;  additional register saves and a return address is pushed onto the stack
+;  to cause the register set to be restored before exit
+
+savreg:	ld	hl,stkd		; address stack depth counter
+	bit	0,(hl)		; stack already saved?
+	ret	nz		; YES! then no action
+
+	ld	(hl),-1		; indicate registers are saved
+
+	ld	hl,restore	; address of restore routine
+	ex	(sp),hl		; swap for return address
+	push	hl		; save our return address
+
+; the flags are cleared
+
+	ld	hl,flags
+	ld	(hl),0		; clear flags
+
+; registers are saved now
+
+	call	savex		; save LASTX
+
+	ld	hl,fp0
+	ld	de,regs
+	ld	bc,5*(numreg+1)	; save full registers
+	ldir
+	ret			; done!
+
+; Routine restores register FP0 before final restore so that ALL registers
+;  are restored.
+
+rest0:	ld	hl,regs
+	ld	de,fp0
+	ld	bc,5		; restore FP0
+	ldir
+	ret
+
+; Routine returns registers
+
+restore:
+	ld	hl,stkd		; stack counter address
+	ld	(hl),0		; clear flag
+
+; Now restore the register set
+
+	ld	hl,regs+5
+	ld	de,fp1
+	ld	bc,5*numreg	; restore all registers beyond FP0
+	ldir
+	ret
+
+
