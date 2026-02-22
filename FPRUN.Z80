@@ -24,9 +24,13 @@ start:	ld	sp,08000h
 ; Here we read from keyboard, taking the appropriate actions to accumulate
 ;  values and perform operations.
 
-rept:	ld	e,'#'
-	ld	c,02h
-	call	bios		; prompt for input
+	ld	de,head		;; informative header
+	ld	c,9
+	call	bios
+
+rept:	ld	de,prompt
+	ld	c,9
+	call	bios		; prompt
 
 	ld	de,buffer	; 20 character buffer
 
@@ -36,8 +40,17 @@ gchar:	push	de		; preserve buffer pointer
 	ld	c,01h		; character read with echo
 	call	bios
 	pop	de
+	
+; check for exit
+	cp	'Q'
+	jr	z,exit
+	cp	'q'
+	jr	nz,accum
+	
+exit:	ld	c,0
+	call	bios
 
-	cp	'+'
+accum:	cp	'+'
 	jr	z,dck
 	cp	'-'
 	jr	nz,ckop
@@ -259,6 +272,8 @@ buffer:	defb	'                    ',0
 display:defb	'              ','$'
 crlf:	defb	cr,lf,'$'
 
+head:	defb	'Use Q to exit$'
+prompt:	defb	cr,lf,'# $'
 o_msg:	defb	'Overflow!',cr,lf,'$'
 d_msg:	defb	'Divide by Zero!',cr,lf,'$'
 i_msg:	defb	'Illegal Operation!',cr,lf,'$'

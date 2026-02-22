@@ -1,4 +1,6 @@
 read fprun.hex
 xreg pc 0100
+go
+exit
 
 

@@ -1,3 +1,3 @@
-asmb fprun hex listing
+asmb fprun /hex /listing
 z80mu
 
