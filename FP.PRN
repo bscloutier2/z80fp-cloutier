@@ -1,0 +1,2871 @@
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 1
+
+
+                      1 ; ***************************************************************************
+                      2 ;	   Algebraic to Revese Polish Notation Conversion Routines
+                      3 ; ***************************************************************************
+                      4 
+                      5 ; These routines perform the algebraic translation to polish postfix
+                      6 ;  which can utilize the Floating Point Package.  This affects only the
+                      7 ;  _ADD, _SUB, _MUL, _DIV and _YTOX routines and adds the A_LEFT, A_RGHT and
+                      8 ;  A_CALC routines for parenthesis and the equals sign.	 A_CLR performs
+                      9 ;  a overall clear.
+                     10 
+                     11 ;  A direct call to _ENTER and _LOAD is used to place each operand on the
+                     12 ;  FP stack.  If the operation is one of "+-*/^()=" or CLR then one of
+                     13 ;  the following operations is called.  All other funtions (i.e. SQRT, SIN,
+                     14 ;  etc.) are immediate and call the FP package directly.
+                     15 
+                     16 ; The following funtions implement algebraic ordering, order of precedence
+                     17 ;  and parenthesis grouping.
+                     18 
+                     19 ;	A_CLR		reset calculator
+                     20 ;	A_CALC		complete calculation of algebraic expression (=)
+                     21 
+                     22 ;	A_ADD		add following operand to top of stack
+                     23 ;	A_SUB		subtract following operand from top of stack
+                     24 ;	A_MUL		multiply following operand with top of stack
+                     25 ;	A_DIV		divide top of stack by following operand
+                     26 ;	A_YTOX		top of stack raised by following operand
+                     27 
+                     28 ;	A_LEFT		Left parenthesis begins operand grouping
+                     29 ;	A_RGHT		Right parenthesis ends operand grouping
+                     30 
+                     31 ; Order of precedence is impletmented as follows in order from highest to
+                     32 ;  lowest:
+                     33 
+                     34 ;	* parenthesis grouping
+                     35 ;	* exponent
+                     36 ;	* multiplication and division from left to right
+                     37 ;	* addition and subtraction from left to right
+                     38 
+                     39 ; As is usual with FP use the FLAGS variable should be checked after every
+                     40 ;  operation.  An additional flag indicates parenthesis grouping overflow.
+                     41 
+                     42 ; Flags
+                     43 ;	D0 - Overflow		; set on overflow
+                     44 ;	D1 - Divide by Zero	; set on divide by zero
+                     45 ;	D2 - Illegal Op		; Illegal Operation
+                     46 ;	D3 - Level Error	; set when grouping goes too deep
+                     47 ;	D4 - Format Overflow	; Scientific notation required
+                     48 	form
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 2
+
+
+                     49 ; ***************************************************************************
+                     50 ;			      Constant Definitions
+                     51 ; ***************************************************************************
+                     52 
+                     53 ; OPSIZ defines the size of the operator stack.  This must be set large
+                     54 ;  enough to accomodate the three (3) levels of precision plus a parenthesis
+                     55 ;  marker for each level of parenthesis allowed.  The stack is made one
+                     56 ;  larger for safety.  Note that greater levels of parenthesis are possible
+                     57 ;  depending on the complexity of the equation.
+                     58 
+      (0004)         59 parlev	equ	4
+      (0011)         60 opsiz	equ	4*parlev + 1
+                     61 
+                     62 ; FP package vectors
+                     63 
+0000  5f09           64 opvect:	defw	_ytox		; exponent
+0002  7c06           65 	defw	_mul		; multiplication
+0004  0a07           66 	defw	_div		; division
+0006  a805           67 	defw	_add		; addition
+0008  a005           68 	defw	_sub		; subtraction
+000a  a800           69 	defw	$rtrn		; discards
+                     70 
+                     71 ; operator descriptors for stack entry.
+                     72 ;  format:	high byte = order of precedence
+                     73 ;		 low byte = index into operator vector
+                     74 
+      (0000)         75 v.ytox	equ	0000h
+      (0102)         76 v.mul	equ	0102h
+      (0104)         77 v.div	equ	0104h
+      (0206)         78 v.add	equ	0206h
+      (0208)         79 v.sub	equ	0208h
+      (030a)         80 v.left	equ	030ah
+      (0400)         81 v.end	equ	0400h		; no operation is associated
+                     82 
+                     83 ; ***************************************************************************
+                     84 ;				   Variables
+                     85 ; ***************************************************************************
+                     86 
+                     87 ; The following stack provides sufficient space for up to 8 levels
+                     88 ;  parenthesis grouping
+                     89 
+000c  (0022)         90 opstk:	defs	2*opsiz
+                     91 
+                     92 ; Stack pointer
+                     93 
+002e  (0002)         94 opptr:	defs	2		; pointer to next word in operator stack
+                     95 	form
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 3
+
+
+                     96 ; ***************************************************************************
+                     97 ;				Algebraic Routines
+                     98 ; ***************************************************************************
+                     99 
+                    100 ; **********
+                    101 ; Subroutine: a_clr
+                    102 ; **********
+                    103 
+                    104 ; Perform overall reset
+                    105 
+0030  210c00        106 a_clr:	ld	hl,opstk	; top of operator stack
+0033  222e00        107 	ld	(opptr),hl	; pointer reset
+                    108 
+0036  010004        109 	ld	bc,v.end	; end of expression marker
+0039  cd8200        110 	call	a$push		; placed on stack
+003c  c36c01        111 	jp	_clr		; clear FP package and return
+                    112 
+                    113 ; **********
+                    114 ; Subroutine: a_calc
+                    115 ; **********
+                    116 
+                    117 ; Complete calculation of current expression
+                    118 
+003f  0e04          119 a_calc:	ld	c,4		; precedence
+0041  1866          120 	jr	a$do		; perform calculations and return
+                    121 
+                    122 ; **********
+                    123 ; Subroutine: a_left
+                    124 ; **********
+                    125 
+                    126 ; Left parenthesis begins operand grouping.  The left parenthesis is placed
+                    127 ;  on the operator stack.
+                    128 
+0043  010a03        129 a_left:	ld	bc,v.left	; parenthesis marker
+0046  183a          130 	jr	a$push		; place on stack and return
+                    131 
+                    132 ; **********
+                    133 ; Subroutine: a_rght
+                    134 ; **********
+                    135 
+                    136 ; Right parenthesis completes an operand grouping and evaluates its content
+                    137 ;  leaving the result on the top of the FP stack.  All operations on the
+                    138 ;  operator stack are performed until the left parenthesis is located.
+                    139 
+0048  0e03          140 a_rght:	ld	c,3		; level of precedence
+004a  cda900        141 	call	a$do		; perform calculations
+004d  284f          142 	jr	z,a$pop		; discard left parenthesis if present
+004f  c9            143 	ret			; done otherwise (end of expression)
+                    144 
+                    145 ; **********
+                    146 ; Subroutine: a_add
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 4
+
+
+                    147 ; **********
+                    148 
+                    149 ; Causes any previous operation to be performed.  The ADD operation is
+                    150 ;  placed on the operator stack.
+                    151 
+0050  0e03          152 a_add:	ld	c,3		; level of precedence
+0052  cda900        153 	call	a$do		; perform calculations
+                    154 
+0055  010602        155 	ld	bc,v.add
+0058  1828          156 	jr	a$push		; place marker on stack and return
+                    157 
+                    158 ; **********
+                    159 ; Subroutine: a_sub
+                    160 ; **********
+                    161 
+                    162 ; Causes any previous operation to be performed.  The SUB operation is
+                    163 ;  placed on the operator stack.
+                    164 
+005a  0e03          165 a_sub:	ld	c,3		; level of precedence
+005c  cda900        166 	call	a$do		; perform calculations
+                    167 
+005f  010802        168 	ld	bc,v.sub
+0062  181e          169 	jr	a$push		; place marker on stack and return
+                    170 
+                    171 ; **********
+                    172 ; Subroutine: a_mul
+                    173 ; **********
+                    174 
+                    175 ; Causes and multiplication, division or exponent operations on the stack to
+                    176 ;  be performed.  The MUL operation is placed on the operator stack.
+                    177 
+0064  0e02          178 a_mul:	ld	c,2		; level of precedence
+0066  cda900        179 	call	a$do		; perform calculations
+                    180 
+0069  010201        181 	ld	bc,v.mul
+006c  1814          182 	jr	a$push		; place marker on stack and return
+                    183 
+                    184 ; **********
+                    185 ; Subroutine: a_div
+                    186 ; **********
+                    187 
+                    188 ; Causes and multiplication, division or exponent operations on the stack to
+                    189 ;  be be performed.  The DIV operation is placed on the operator stack.
+                    190 
+006e  0e02          191 a_div:	ld	c,2		; level of precedence
+0070  cda900        192 	call	a$do		; perform calculations
+                    193 
+0073  010401        194 	ld	bc,v.div
+0076  180a          195 	jr	a$push		; place marker on stack and return
+                    196 
+                    197 ; **********
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 5
+
+
+                    198 ; Subroutine: a_ytox
+                    199 ; **********
+                    200 
+                    201 ; Causes exponent operations on the stack to be performed.  The YTOX
+                    202 ;  operation is placed on the operator stack.
+                    203 
+0078  0e01          204 a_ytox:	ld	c,1		; level of precedence
+007a  cda900        205 	call	a$do		; perform calculations
+                    206 
+007d  010000        207 	ld	bc,v.ytox
+0080  1800          208 	jr	a$push		; place marker on stack and return
+                    209 	form
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 6
+
+
+                    210 
+                    211 ; ***************************************************************************
+                    212 ; 			   Internal Utility Routines
+                    213 ; ***************************************************************************
+                    214 
+                    215 ; A$PUSH
+                    216 
+                    217 ; Routine places operation marker in reg.bc on operator stack if there is
+                    218 ;  enough room.  The appropriate flag is set otherwise.
+                    219 
+0082  2a2e00        220 a$push:	ld	hl,(opptr)	; current stack pointer
+0085  112e00        221 	ld	de,opstk + 2*opsiz
+0088  b7            222 	or	a
+0089  ed52          223 	sbc	hl,de		; room in stack?
+008b  3806          224 	jr	c,apush0	; YES! then continue
+                    225 
+008d  21c800        226 	ld	hl,flags
+0090  cbde          227 	set	3,(hl)		; indicate stack overflow
+0092  c9            228 	ret			; exit
+                    229 
+                    230 ; place marker on stack
+                    231 
+0093  2a2e00        232 apush0:	ld	hl,(opptr)	; pointer
+0096  71            233 	ld	(hl),c
+0097  23            234 	inc	hl
+0098  70            235 	ld	(hl),b
+0099  23            236 	inc	hl
+009a  222e00        237 	ld	(opptr),hl	; pointer updated - item on stack
+009d  c9            238 	ret			; done
+                    239 
+                    240 ; A$POP
+                    241 
+                    242 ; Routine removes top item from the stack.  Returns marker in reg.bc.
+                    243 ;  Z is set if stack was empty.
+                    244 
+009e  2a2e00        245 a$pop:	ld	hl,(opptr)	; pointer
+00a1  2b            246 	dec	hl
+00a2  46            247 	ld	b,(hl)
+00a3  2b            248 	dec	hl
+00a4  4e            249 	ld	c,(hl)
+00a5  222e00        250 	ld	(opptr),hl	; pointer updated
+00a8  c9            251 $rtrn:	ret
+                    252 
+                    253 ; A$DO
+                    254 
+                    255 ; Performs operation from top of operator stack with level of precedence
+                    256 ;  less than that supplied in reg.b.
+                    257 
+00a9  2a2e00        258 a$do:	ld	hl,(opptr)	; pointer to top of stack
+00ac  2b            259 	dec	hl		; address high byte
+00ad  7e            260 	ld	a,(hl)		; retrieve level of precedence
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 7
+
+
+00ae  b9            261 	cp	c		; less than or equal to this?
+00af  d0            262 	ret	nc		; NO! then done
+                    263 
+00b0  c5            264 	push	bc		; save precedence
+00b1  cdb700        265 	call	ado0		; perform operation from stack
+00b4  c1            266 	pop	bc		; retrieve precedence
+00b5  18f2          267 	jr	a$do		; repeat
+                    268 
+                    269 ; Perform operation as stored on top of the operator stack
+                    270 
+00b7  cd9e00        271 ado0:	call	a$pop		; obtain marker
+                    272 
+00ba  0600          273 	ld	b,0		; convert index to word
+00bc  210000        274 	ld	hl,opvect	; FP operation vector
+00bf  09            275 	add	hl,bc		; pointer into vector
+                    276 
+                    277 ; get address of operation and go do it
+                    278 
+00c0  7e            279 	ld	a,(hl)
+00c1  23            280 	inc	hl
+00c2  66            281 	ld	h,(hl)
+00c3  6f            282 	ld	l,a
+00c4  e9            283 	jp	(hl)		; perform operation and return
+                    284 	form
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 8
+
+
+                    285 
+                    286 ; ***************************************************************************
+                    287 ; 			   Floating Point Package
+                    288 ; ***************************************************************************
+                    289 
+                    290 ; The following are the available entry points:
+                    291 
+                    292 ;	_CLX		zeroes the top stack position
+                    293 ;	_CLR		zeroes all registers
+                    294 
+                    295 ;	_ROLLU		roll stack up (top goes to bottom)
+                    296 ;	_ROLLD		roll stack down (bottom goes to top)
+                    297 ;	_LASTX		restores last value to top of stack
+                    298 ;	_SWAP		exchange the top two stack positions
+                    299 ;	_CHS		change the sign of the top value on the stack
+                    300 
+                    301 ;	_ENTER		duplicates top stack position, bottom is lost
+                    302 ;	_LOAD		enter ASCII formatted value on top of stack
+                    303 ;	_IOTF		unsigned integer in reg.hl is pushed onto stack
+                    304 ;	_BTOF		signed byte value in reg.a is pushed onto stack
+                    305 
+                    306 ;	_FTOI		extracts integer value from top of stack
+                    307 ;	_SCI		extract scientific notation ASCII string
+                    308 ;	_VALUE		extract ASCII representation of FP0
+                    309 
+                    310 ;	_ADD		add top two stack postions, bottom duplicated
+                    311 ;	_SUB		subtract top from the second on stack, bottom dup'ed
+                    312 ;	_MUL		multiply top two stacks, bottom duplicated
+                    313 ;	_DIV		divide top into second, bottom duplicated
+                    314 
+                    315 ;	_INT		replace top value with its integer value
+                    316 ;	_ABS		replace top value with its absolute value
+                    317 
+                    318 ;	_SQRT		square root of value
+                    319 ;	_YTOX		second value to the power of the top value
+                    320 ;	_EXP		exponential function: e to the x
+                    321 ;	_LN		natural logarithm
+                    322 
+                    323 ;	_SIN		sine of value in radians
+                    324 ;	_COS		cosine of value in radians
+                    325 ;	_TAN		tangent of value in radians
+                    326 ;	_ATN		arctangent (returns radians)
+                    327 
+                    328 ; Flags
+                    329 ;	D0 - Overflow		; set on overflow
+                    330 ;	D1 - Divide by Zero	; set on divide by zero
+                    331 ;	D2 - Illegal Op		; Illegal Operation
+                    332 ;	D3 - Reserved
+                    333 
+                    334 ; ***************************************************************************
+                    335 ; 			Floating Point Register Format
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 9
+
+
+                    336 ; ***************************************************************************
+                    337 
+                    338 ; Floating Point numbers are stored in the following format.  There are
+                    339 ;  many differing formats for floating point.  There is no particular
+                    340 ;  advantage to ours except in that it is compatible with other DTI
+                    341 ;  product usage.
+                    342 
+                    343 ; The Floating Point (abbrieviated FP) value is represented by a fractional
+                    344 ;  part called the 'Mantissa' and an order of magnitude called the 'Exponent'.
+                    345 ;  The mantissa is a scaled decimal value less than 1.00000.  It has a sign
+                    346 ;  and therefore may be either positive or negative.  The exponent defines
+                    347 ;  the order of magnitude to which the fractional part is scaled to form the
+                    348 ;  intended value.  The exponent is the power applied to some base in order
+                    349 ;  to obtain the scaling factor.  We will use base two, however, we may have
+                    350 ;  used another.  A higher base such as sixteen would allow use to represent
+                    351 ;  extremely large and very minute values.  As we will see base two provides
+                    352 ;  enough range.  The largest value that may be represented is 1.7E+38.  The
+                    353 ;  smallest being 3.5E-46.
+                    354 
+                    355 ; The exponent will be stored in a single signed byte.  This value can then
+                    356 ;  be in the range -127 through +127.  This is stored in excess 128 form,
+                    357 ;  that is that 07fh represents -1, 080h represents 0 and 081h represents
+                    358 ;  positive 1.  The largest exponent being +127 stored as 0ffh and the 
+                    359 ;  smallest being -127 stored as 001h.  Note that we reserve the exponent
+                    360 ;  value of 000h to indicate FP zero, the value 0.00000.  The sign of the
+                    361 ;  exponent is indicated by bit 7.
+                    362 
+                    363 ; The value 0.08714E+10 is more precisely maintained in the form 0.87143E+09.
+                    364 ;  This takes advantage of the available precision afforded by the size of
+                    365 ;  the mantissa.  The latter value is 'Normalized' in that the digit 
+                    366 ;  immediately to the right of the decimal point is nonzero.  In binary
+                    367 ;  form a normalized FP value always has the MSB of the mantissa equal to
+                    368 ;  a 1.  The fractional part then always assumes a value from 0.500 to 
+                    369 ;  1.00 since our base is 2.
+                    370 
+                    371 ; Since the MSB of the mantissa is always 1 we don't bother to store it and
+                    372 ;  we use this bit position to store the sign of the entire FP value.  Thus
+                    373 ;  if the MSB of the mantissa has bit 7 set then then value is negative.
+                    374 
+                    375 ; The entire FP register is 4 bytes (a 1 byte exponent and a 24 bit mantissa).
+                    376 ;  This is stored is successive memory locations from LSB to MSB of the
+                    377 ;  mantissa followed by the exponent.
+                    378 
+                    379 ; Here are some examples:
+                    380 
+                    381 ;	0aah,056h,019h,080h	; +0.598979
+                    382 ;	0f1h,022h,076h,080h	; +0.961471
+                    383 ;	045h,0aah,038h,082h	; +2.88539
+                    384 ;	064h,026h,099h,087h	; -76.575
+                    385 
+                    386 ; ***************************************************************************
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 10
+
+
+                    387 ; 				Variables
+                    388 ; ***************************************************************************
+                    389 
+00c5  00            390 sign0:	defb	000h		; stores sign of FP0 during calculation
+00c6  00            391 sign1:	defb	000h		; stores sign of FP1 during calculation
+                    392 
+00c7  ff            393 fixset:	defb	-1		; FIX mode = 0-6, SCI mode = -1
+                    394 
+                    395 ; Flags
+                    396 ;	D0 - Overflow		; set on overflow
+                    397 ;	D1 - Divide by Zero	; set on divide by zero
+                    398 ;	D2 - Illegal Op		; Illegal Operation
+                    399 ;	D3 - Reserved
+                    400 ;	D4 - Format Overflow	; Scientific notation required
+                    401 
+00c8  00            402 flags:	defb	000h		; calculator flags
+                    403 
+00c9  00            404 texp:	defb	000h		; tens exponent during conversions
+                    405 
+00ca  00            406 stkd:	defb	000h		; stack depth
+                    407 
+                    408 ; buffer for significant digits
+                    409 
+00cb  2b303030      410 sdigs:	defb	'+000000'
+      303030 
+                    411 
+                    412 ; ***************************************************************************
+                    413 ; 			Floating Point Register Stack
+                    414 ; ***************************************************************************
+                    415 
+                    416 ; We use a single precision stack.  FP0 is our floating point
+                    417 ;  accumulator.  FP3 is replicated on POP operations.  FPX and FPY are
+                    418 ;  additional registers for scratch use.  FPX resides immediately following
+                    419 ;  the register stack to assist in ROLL UP and ROLL DOWN operations.
+                    420 
+      (000c)        421 numreg	equ	3*parlev
+                    422 
+                    423 ;	      |-Guard-|----Mantissa----|-Exponent-|
+                    424 
+00d2  00000000      425 fp0:	defb	000h,	000h,000h,000h,    000h
+      00 
+00d7  (0037)        426 fp1:	defs	5*(numreg-1)
+010e  00000000      427 fpx:	defb	000h,	000h,000h,000h,    000h
+      00 
+                    428 
+0113  00000000      429 fpy:	defb	000h,	000h,000h,000h,    000h
+      00 
+0118  00000000      430 fpz:	defb	000h,	000h,000h,000h,    000h
+      00 
+                    431 
+                    432 ; Temporary storage for copy of registers
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 11
+
+
+                    433 
+011d  (0041)        434 regs:	defs	(numreg+1)*5
+                    435 
+                    436 ; ************************** END OF VARIABLES *******************************
+                    437 	form
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 12
+
+
+                    438 
+                    439 ; ***************************************************************************
+                    440 ;			     Basic Operations
+                    441 ; ***************************************************************************
+                    442 
+                    443 ; **********
+                    444 ; Subroutine: _clx
+                    445 ; **********
+                    446 
+                    447 ; Routine clears FP0 only
+                    448 
+015e  21d200        449 _clx:	ld	hl,fp0		; initialize pointers and count
+0161  11d300        450 	ld	de,fp0+1
+0164  010400        451 	ld	bc,4
+                    452 
+0167  3600          453 	ld	(hl),0		; clear the initial byte
+0169  edb0          454 	ldir			; repeat to clear balance of bytes
+016b  c9            455 	ret			; done
+                    456 
+                    457 ; **********
+                    458 ; Subroutine: _clr
+                    459 ; **********
+                    460 
+                    461 ; Routine clears all fp registers
+                    462 
+016c  21d200        463 _clr:	ld	hl,fp0		; initialize pointers and count
+016f  11d300        464 	ld	de,fp0+1
+0172  013b00        465 	ld	bc,5*numreg-1	; clear full registers
+                    466 
+0175  3600          467 	ld	(hl),0		; clear the initial byte
+0177  edb0          468 	ldir			; repeat to clear balance of bytes
+0179  c9            469 	ret			; done
+                    470 
+                    471 ; **********
+                    472 ; Subroutine: _rollu
+                    473 ; **********
+                    474 
+                    475 ; Routine rolls the stack up one position and FP3 gets FP0.
+                    476 
+017a  21d200        477 _rollu:	ld	hl,fp0		; source
+017d  110e01        478 	ld	de,fpx		; destination
+0180  010500        479 	ld	bc,5		; move one full register
+0183  edb0          480 	ldir			; copy FP0 to scratch register
+                    481 
+0185  21d700        482 	ld	hl,fp1		; source
+0188  11d200        483 	ld	de,fp0		; destination
+018b  013c00        484 	ld	bc,5*numreg	; move full registers
+018e  edb0          485 	ldir			; shift all registers up
+0190  c9            486 	ret
+                    487 
+                    488 ; **********
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 13
+
+
+                    489 ; Subroutine: _rolld
+                    490 ; **********
+                    491 
+                    492 ; Routine rolls the stack down one position and FP0 gets FP3.
+                    493 
+0191  210d01        494 _rolld:	ld	hl,fpx-1	; source
+0194  111201        495 	ld	de,fpx+4	; destination
+0197  013c00        496 	ld	bc,5*numreg	; move full registers
+019a  edb8          497 	lddr
+                    498 
+019c  210e01        499 	ld	hl,fpx		; source
+019f  11d200        500 	ld	de,fp0		; destination
+01a2  010500        501 	ld	bc,5		; one full register
+01a5  edb0          502 	ldir
+01a7  c9            503 	ret
+                    504 
+                    505 ; **********
+                    506 ; Subroutine: _lastx
+                    507 ; **********
+                    508 
+                    509 ; Routine obtains last saved value of accumulator
+                    510 
+01a8  210e01        511 _lastx:	ld	hl,fpx
+01ab  c3110b        512 	jp	push		; push stack
+                    513 
+                    514 ; **********
+                    515 ; Subroutine: _swap
+                    516 ; **********
+                    517 
+                    518 ; Routine exchanges FP0 and FP1
+                    519 
+01ae  21d200        520 _swap:	ld	hl,fp0		; address the two registers
+01b1  11d700        521 	ld	de,fp1
+01b4  0605          522 	ld	b,5		; register length
+                    523 
+                    524 ; now loop and perform exchange
+                    525 
+01b6  1a            526 swap0:	ld	a,(de)
+                    527 
+01b7  4e            528 	ld	c,(hl)
+01b8  77            529 	ld	(hl),a
+01b9  23            530 	inc	hl
+                    531 
+01ba  79            532 	ld	a,c
+01bb  12            533 	ld	(de),a
+01bc  13            534 	inc	de
+01bd  10f7          535 	djnz	swap0
+01bf  c9            536 	ret			; done
+                    537 
+                    538 ; **********
+                    539 ; Subroutine: _chs
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 14
+
+
+                    540 ; **********
+                    541 
+                    542 ; Routine changes the sign of the accumulator
+                    543 
+01c0  21d500        544 _chs:	ld	hl,fp0+3	; MSB of accumulator mantissa
+01c3  3e80          545 	ld	a,80h
+01c5  ae            546 	xor	(hl)
+01c6  77            547 	ld	(hl),a		; toggled bit 7
+01c7  c9            548 	ret
+                    549 
+                    550 ; **********
+                    551 ; Subroutine: _enter
+                    552 ; **********
+                    553 
+                    554 ; Routine performs an ENTER.  Registers shift down and FP0 is copied.
+                    555 
+01c8  210801        556 _enter:	ld	hl,fpx-6	; source
+01cb  110d01        557 	ld	de,fpx-1	; destination
+01ce  013700        558 	ld	bc,5*(numreg-1)	; full registers are moved
+01d1  edb8          559 	lddr			; copy proceeds in reverse direction
+01d3  c9            560 	ret
+                    561 
+                    562 ; ***************************************************************************
+                    563 ; 			Numeric Entry/Display Routines
+                    564 ; ***************************************************************************
+                    565 
+                    566 ; **********
+                    567 ; Subroutine: _load
+                    568 ; **********
+                    569 
+                    570 ; Routine accepts an ASCII string terminated by a nul and enters the value
+                    571 ;  on the top of the register stack.  Entry is with reg.hl addressing the
+                    572 ;  ASCII string.
+                    573 
+                    574 ; skip leading spaces
+                    575 
+01d4  e5            576 _load:	push	hl		; save pointer
+01d5  cd500b        577 	call	savreg		; preserve registers
+                    578 
+01d8  e1            579 	pop	hl
+01d9  e3            580 	ex	(sp),hl		; obtain pointer
+                    581 
+01da  cd8e02        582 load0:	call	leads		; skip leading spaces
+01dd  fe2b          583 	cp	'+'		; is first nonblank a sign?
+01df  2003          584 	jr	nz,notpos	; NO! then continue
+                    585 
+                    586 ; the plus sign is ignored
+                    587 
+01e1  23            588 	inc	hl		; bump pointer of the sign
+01e2  18f6          589 	jr	load0		; proceed with load
+                    590 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 15
+
+
+01e4  fe2d          591 notpos:	cp	'-'		; is value to be negative?
+01e6  f5            592 	push	af		; save sign indication
+01e7  2004          593 	jr	nz,notneg	; NO! then continue
+                    594 
+01e9  23            595 	inc	hl		; skip sign
+01ea  cd8e02        596 	call	leads		; skip any further spaces
+                    597 
+01ed  e5            598 notneg:	push	hl		; save pointer
+                    599 
+01ee  cd5e01        600 	call	_clx		; clear the top register
+                    601 
+01f1  af            602 	xor	a
+01f2  32c900        603 	ld	(texp),a	; clear decimal point position indicator
+                    604 
+01f5  e1            605 nload:	pop	hl		; pointer
+01f6  7e            606 	ld	a,(hl)		; get character
+01f7  23            607 	inc	hl		; bump pointer
+01f8  e5            608 	push	hl		; save pointer
+                    609 
+01f9  a7            610 	and	a		; nul?
+01fa  282f          611 	jr	z,dload		; if nul then we are done
+                    612 
+01fc  fe2e          613 	cp	'.'		; decimal point encountered
+01fe  2007          614 	jr	nz,notdec	; NO! then continue
+                    615 
+                    616 ; now we set the indicator to nonzero.  This indicates that a decimal point
+                    617 ;  has been found and that we need to tract its position.
+                    618 
+0200  21c900        619 	ld	hl,texp
+0203  3601          620 	ld	(hl),1		; indicate decimal point found
+0205  18ee          621 	jr	nload		; on to next digit
+                    622 
+                    623 ; now we accumulate the digit
+                    624 
+0207  d630          625 notdec:	sub	'0'		; convert to binary
+0209  fe0a          626 	cp	10		; is this 0-9?
+020b  301e          627 	jr	nc,dload	; NO! then done
+                    628 
+020d  f5            629 	push	af		; save digit
+                    630 
+020e  21c900        631 	ld	hl,texp		; address decimal point position indicator
+0211  7e            632 	ld	a,(hl)
+0212  a7            633 	and	a		; encountered decimal point?
+0213  2801          634 	jr	z,nodec		; NO! then do not change indicator
+                    635 
+0215  34            636 	inc	(hl)		; indicate additional digit beyond decimal pt.
+                    637 
+0216  217c05        638 nodec:	ld	hl,ten
+0219  cd110b        639 	call	push
+021c  cd7c06        640 	call	_mul		; multiply by 10.00
+                    641 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 16
+
+
+021f  f1            642 	pop	af		; retrieve digit
+0220  6f            643 	ld	l,a		; convert to word
+0221  2600          644 	ld	h,0
+0223  cd9602        645 	call	_itof		; load FP0 with integer
+                    646 
+0226  cda805        647 	call	_add		; add to accumulation
+0229  18ca          648 	jr	nload		; load next character
+                    649 
+                    650 ; Now we are done.  If a decimal point was included then we adjust the
+                    651 ;  scaling of the final value to properly place the point.
+                    652 
+022b  3ac900        653 dload:	ld	a,(texp)
+022e  fe02          654 	cp	2		; any decimal point?
+0230  380f          655 	jr	c,dload0	; NO! then we are properly scaled
+                    656 
+0232  3d            657 	dec	a		; adjusted to obtain count for scaling
+0233  47            658 	ld	b,a		; scale by this
+0234  c5            659 lscale:	push	bc		; save count
+                    660 
+0235  217c05        661 	ld	hl,ten
+0238  cd110b        662 	call	push
+023b  cd0a07        663 	call	_div		; divide by 10.0
+                    664 
+023e  c1            665 	pop	bc
+023f  10f3          666 	djnz	lscale		; continue to scale
+                    667 
+                    668 ; Lastly we must check the desired sign of this value
+                    669 
+0241  e1            670 dload0:	pop	hl		; retrieve pointer
+0242  2b            671 	dec	hl		; return to last character encountered
+                    672 
+0243  7e            673 	ld	a,(hl)		; obtain character
+0244  23            674 	inc	hl		; bump pointer
+                    675 
+0245  fe45          676 	cp	'E'		; exponent specified?
+0247  2040          677 	jr	nz,dload1	; NO! then we are done
+                    678 
+                    679 ; now get sign of exponent
+                    680 
+0249  7e            681 	ld	a,(hl)		; obtain character
+024a  fe2b          682 	cp	'+'		; plus sign?
+024c  2001          683 	jr	nz,notp		; NO! then continue
+                    684 
+024e  23            685 	inc	hl		; skip plus sign
+024f  fe2d          686 notp:	cp	'-'		; negative sign?
+0251  f5            687 	push	af		; save flag for later sign adjust
+0252  2001          688 	jr	nz,notn		; NO! then proceed
+                    689 
+0254  23            690 	inc	hl		; skip sign
+                    691 
+                    692 ; now we need to obtain the magnitude of the specified exponent
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 17
+
+
+                    693 
+0255  0600          694 notn:	ld	b,0		; clear accumulation
+                    695 
+0257  7e            696 gexp:	ld	a,(hl)		; get digit
+0258  23            697 	inc	hl		; bump pointer
+0259  d630          698 	sub	'0'		; convert to binary
+025b  fe0a          699 	cp	10		; is it 0-9?
+025d  300a          700 	jr	nc,dexp		; NO! then done with exponent
+                    701 
+025f  4f            702 	ld	c,a		; save digit
+                    703 
+0260  78            704 	ld	a,b
+0261  87            705 	add	a		; multiply by 10
+0262  87            706 	add	a
+0263  80            707 	add	b
+0264  87            708 	add	a
+0265  81            709 	add	c
+0266  47            710 	ld	b,a
+0267  18ee          711 	jr	gexp		; continue to get exponent
+                    712 
+0269  78            713 dexp:	ld	a,b		; get magnitude of exponent
+026a  a7            714 	and	a		; zero?
+026b  281b          715 	jr	z,fexp		; YES! then done here
+                    716 
+026d  f1            717 dexp0:	pop	af		; sign flag
+                    718 
+026e  c5            719 dexp1:	push	bc		; save counter
+026f  f5            720 	push	af		; save flag
+                    721 
+0270  217c05        722 	ld	hl,ten
+0273  cd110b        723 	call	push
+                    724 
+0276  f1            725 	pop	af
+0277  f5            726 	push	af
+0278  2805          727 	jr	z,dexp2		; jump if exponent is negative
+027a  cd7c06        728 	call	_mul		; scale in appropriate direction
+027d  1803          729 	jr	dexp3
+                    730 
+027f  cd0a07        731 dexp2:	call	_div
+0282  f1            732 dexp3:	pop	af		; flag
+0283  c1            733 	pop	bc		; retrieve counter
+0284  10e8          734 	djnz	dexp1
+0286  1801          735 	jr	dload1
+                    736 
+                    737 ; now set proper sign
+                    738 
+0288  f1            739 fexp:	pop	af		; discard flag
+0289  f1            740 dload1:	pop	af		; sign indication
+028a  cac001        741 	jp	z,_chs		; negate if a negative sign was encountered
+028d  c9            742 	ret
+                    743 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 18
+
+
+                    744 ; Routine skips spaces in the string addressed by reg.hl.
+                    745 
+028e  7e            746 leads:	ld	a,(hl)		; get first character
+028f  23            747 	inc	hl		; bump pointer
+0290  fe20          748 	cp	' '		; is it a space
+0292  28fa          749 	jr	z,leads		; YES! then skip it
+                    750 
+0294  2b            751 	dec	hl		; adjust pointer
+0295  c9            752 	ret			; return
+                    753 
+                    754 ; **********
+                    755 ; Subroutine: _itof
+                    756 ; **********
+                    757 
+                    758 ; Routine loads top register with integer value of reg.hl.  Integer value
+                    759 ;  is unsigned.
+                    760 
+0296  e5            761 _itof:	push	hl		; save value
+0297  cdc801        762 	call	_enter		; move stack down
+029a  cd5e01        763 	call	_clx		; clear top of stack
+                    764 
+029d  e1            765 	pop	hl		; integer value
+029e  22d400        766 	ld	(fp0+2),hl	; loaded into FP0
+                    767 
+02a1  3e90          768 	ld	a,90h
+02a3  32d600        769 	ld	(fp0+4),a	; set exponent for 2^16
+                    770 
+02a6  af            771 	xor	a
+02a7  32c500        772 	ld	(sign0),a	; clear sign to positive
+02aa  c3c807        773 	jp	norm		; normalize FP0 and return
+                    774 
+                    775 ; **********
+                    776 ; Subroutine: _btof
+                    777 ; **********
+                    778 
+                    779 ; Routine loads top register with signed integer value of reg.a.
+                    780 
+02ad  f5            781 _btof:	push	af		; save value
+02ae  cdc801        782 	call	_enter		; move stack down
+02b1  cd5e01        783 	call	_clx		; clear top of stack
+                    784 
+02b4  f1            785 	pop	af		; integer value
+02b5  32d500        786 	ld	(fp0+3),a	; loaded into FP0
+                    787 
+02b8  e680          788 	and	080h		; extract sign
+02ba  32c500        789 	ld	(sign0),a
+02bd  2808          790 	jr	z,btof0		; jump if positive
+                    791 
+02bf  3ad500        792 	ld	a,(fp0+3)
+02c2  ed44          793 	neg		 	; negate the value
+02c4  32d500        794 	ld	(fp0+3),a
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 19
+
+
+                    795 
+02c7  3e88          796 btof0:	ld	a,88h
+02c9  32d600        797 	ld	(fp0+4),a	; set exponent for 2^8
+02cc  c3c807        798 	jp	norm		; normalize FP0 and return
+                    799 
+                    800 ; **********
+                    801 ; Subroutine: _ftoi
+                    802 ; **********
+                    803 
+                    804 ; routine extracts integer value of FP0 into registers.  Returns 24 bit
+                    805 ;  integer in reg.e and reg.hl.  The MSB in reg.e.
+                    806 
+02cf  3ad600        807 _ftoi:	ld	a,(fp0+4)	; exponent
+02d2  fe81          808 	cp	081h		; check scale
+02d4  3844          809 	jr	c,zftoi		; <1 so return zero
+02d6  fe99          810 	cp	099h		; value too large?
+02d8  d0            811 	ret	nc		; YES! then no action (for now)
+                    812 
+02d9  21d300        813 	ld	hl,fp0+1
+02dc  111401        814 	ld	de,fpy+1
+02df  010400        815 	ld	bc,4
+02e2  edb0          816 	ldir			; get a scratch copy of fp0
+                    817 
+                    818 ; First we extract the sign
+                    819 
+02e4  211601        820 	ld	hl,fpy+3
+02e7  7e            821 	ld	a,(hl)
+02e8  cbfe          822 	set	7,(hl)		; set MSB of mantissa
+02ea  e680          823 	and	080h
+02ec  f5            824 	push	af		; save sign
+                    825 
+                    826 ; Now we scale the fractional part of FP0 by 1/2 and increase its exponent by
+                    827 ;  1.  We do this until the exponent is 098h then the mantissa is the
+                    828 ;  integer part.
+                    829 
+02ed  3a1701        830 ftoic:	ld	a,(fpy+4)	; obtain exponent
+02f0  fe98          831 	cp	098h		; scaled properly?
+02f2  2811          832 	jr	z,ftoir		; YES! then we have the integer part
+                    833 
+02f4  211601        834 	ld	hl,fpy+3	; MSB of mantissa
+02f7  0603          835 	ld	b,3		; three bytes
+02f9  af            836 	xor	a		; clear CY
+                    837 
+                    838 ; Perform shift through the mantissa
+                    839 
+02fa  cb1e          840 ftois:	rr	(hl)		; divide by two (CY gets bit 0)
+02fc  2b            841 	dec	hl		; to next byte
+02fd  10fb          842 	djnz	ftois		; complete shift through mantissa
+                    843 
+02ff  211701        844 	ld	hl,fpy+4	; address exponent
+0302  34            845 	inc	(hl)		; increased
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 20
+
+
+0303  18e8          846 	jr	ftoic		; repeat
+                    847 
+                    848 ; Now we return the integer and discard the scratch register
+                    849 
+0305  211601        850 ftoir:	ld	hl,fpy+3
+0308  5e            851 	ld	e,(hl)		; obtain MSB
+0309  2a1401        852 	ld	hl,(fpy+1)	; obtain lower 16 bits
+                    853 
+030c  f1            854 	pop	af		; obtain sign flag
+030d  c8            855 	ret	z		; return if positive
+                    856 
+                    857 ; negate the integer value
+                    858 
+030e  af            859 	xor	a
+030f  95            860 	sub	l
+0310  6f            861 	ld	l,a
+                    862 
+0311  3e00          863 	ld	a,0
+0313  9c            864 	sbc	h
+0314  67            865 	ld	h,a
+                    866 
+0315  3e00          867 	ld	a,0
+0317  9b            868 	sbc	e
+0318  5f            869 	ld	e,a
+0319  c9            870 	ret			; done
+                    871 
+                    872 ; returns zero
+                    873 
+031a  af            874 zftoi:	xor	a
+031b  210000        875 	ld	hl,0
+031e  c9            876 	ret
+                    877 
+                    878 ; **********
+                    879 ; Subroutine: _value
+                    880 ; **********
+                    881 
+                    882 ; Routine returns a 12 character ASCII string for the selected register.
+                    883 ;  Reg.a defines the desired register (0-3).  Reg.hl specifies the
+                    884 ;  destination address.
+                    885 
+031f  e5            886 _value:	push	hl		; save string destination address
+                    887 
+                    888 ; blank the destination string
+                    889 
+0320  54            890 	ld	d,h
+0321  5d            891 	ld	e,l
+0322  13            892 	inc	de
+0323  010b00        893 	ld	bc,11
+0326  3620          894 	ld	(hl),' '
+0328  edb0          895 	ldir			; copy blanks into the string
+                    896 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 21
+
+
+032a  cd500b        897 	call	savreg		; save registers
+032d  cd5f04        898 	call	gdig		; extract significant digits and exponent
+                    899 
+0330  e1            900 	pop	hl
+0331  e3            901 	ex	(sp),hl		; string address
+0332  eb            902 	ex	de,hl
+                    903 
+                    904 ; if the value exceeds 999999. then scientific notation is required.  If
+                    905 ;  the value is less than .100000 scientific notation is also used.
+                    906 
+0333  3ac900        907 	ld	a,(texp)
+0336  fefb          908 	cp	-5		; should we check for tame decimals?
+0338  3836          909 	jr	c,val.g		; NO! then check other
+                    910 
+                    911 ; now if there are enough trailing zeroes we can display without using
+                    912 ;  scientific notation.  Here we count the trailing zeroes.
+                    913 
+033a  ed44          914 	neg			; count of needed zeroes
+033c  47            915 	ld	b,a
+                    916 
+033d  21d100        917 	ld	hl,sdigs+6	; last digit
+                    918 
+0340  3e30          919 val.dz:	ld	a,'0'		; the desired zero
+0342  be            920 	cp	(hl)		; match?
+0343  2807          921 	jr	z,val.d2	; YES! then on to next digit
+                    922 
+0345  3ac700        923 	ld	a,(fixset)
+0348  fe07          924 	cp	7		; FIX notation in use?
+034a  3077          925 	jr	nc,fix.e	; NO! then we need scientific notation
+                    926 
+034c  2b            927 val.d2:	dec	hl		; back to previous digit
+034d  10f1          928 	djnz	val.dz		; check further
+                    929 
+                    930 ; If we fall through here then there are enough zeroes to avoid the
+                    931 ;  scientific notation requirement
+                    932 
+034f  d5            933 val.fx:	push	de
+                    934 
+0350  11d100        935 	ld	de,sdigs+6
+0353  eda8          936 val.t0:	ldd			; transfer
+                    937 
+0355  01cb00        938 	ld	bc,sdigs
+0358  e5            939 	push	hl
+0359  b7            940 	or	a
+035a  ed42          941 	sbc	hl,bc		; end of transfer?
+035c  e1            942 	pop	hl
+035d  20f4          943 	jr	nz,val.t0
+                    944 
+035f  3e30          945 	ld	a,'0'
+0361  12            946 val.t1:	ld	(de),a		; leading zeroes inserted
+0362  1b            947 	dec	de
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 22
+
+
+                    948 
+0363  21cb00        949 	ld	hl,sdigs
+0366  b7            950 	or	a
+0367  ed52          951 	sbc	hl,de		; end of transformation?
+0369  20f6          952 	jr	nz,val.t1	; NO! then continue
+                    953 
+036b  af            954 	xor	a
+036c  32c900        955 	ld	(texp),a	; exponent is eliminated
+                    956 
+036f  d1            957 	pop	de
+                    958 
+0370  3ac900        959 val.g:	ld	a,(texp)
+0373  fe07          960 	cp	7
+0375  304c          961 	jr	nc,fix.e	; scientific notation is required
+                    962 
+                    963 ; Here we transfer the digits to the output string
+                    964 
+0377  21cb00        965 	ld	hl,sdigs	
+037a  010700        966 	ld	bc,7		; maximum moves
+037d  eda0          967 	ldi			; transfer the sign
+                    968 
+                    969 ; if the value is less than 1.0 then we display the leading zero 0.100
+                    970 
+037f  a7            971 	and	a		; need leading zero?
+0380  2006          972 	jr	nz,val.t	; NO! then skip it
+                    973 
+0382  eb            974 	ex	de,hl
+0383  3630          975 	ld	(hl),'0'	; insert a zero
+0385  23            976 	inc	hl
+0386  1806          977 	jr	val.z
+                    978 
+0388  eda0          979 val.t:	ldi			; transfer a character
+038a  3d            980 	dec	a
+038b  20fb          981 	jr	nz,val.t	; repeat up to the decimal point
+                    982 
+038d  eb            983 	ex	de,hl
+038e  362e          984 val.z:	ld	(hl),'.'	; transfer a decimal point
+0390  23            985 	inc	hl
+0391  eb            986 	ex	de,hl
+                    987 
+                    988 ; if FIXSET is -1 then we branch to code that suppresses trailing zeroes
+                    989 ;  and dangling decimal points.  Otherwise we must include the selected
+                    990 ;  number of decimal places.
+                    991 
+0392  3ac700        992 	ld	a,(fixset)
+0395  fe07          993 	cp	7		; set to 0-6?
+0397  3038          994 	jr	nc,suppss	; NO! then jump to perform suppressed form
+                    995 
+                    996 ; now if FIXSET is 0 then no decimal places are required - we are done
+                    997 ;  right now.
+                    998 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 23
+
+
+0399  a7            999 	and	a		; fixset = 0?
+039a  283b         1000 	jr	z,trunc		; YES! then done (drop decimal)
+                   1001 
+039c  78           1002 	ld	a,b
+039d  b1           1003 	or	c		; anything left to transfer?
+039e  3ac700       1004 	ld	a,(fixset)
+03a1  2809         1005 	jr	z,fix.p		; NO! then done
+                   1006 
+                   1007 ; transfer balance of digits up to FIXSET
+                   1008 
+03a3  3d           1009 fix.t:	dec	a		; count down to FIXSET
+                   1010 
+03a4  eda0         1011 	ldi			; transfer a character
+03a6  e2ac03       1012 	jp	po,fix.p	; jump if digits done
+                   1013 
+03a9  a7           1014 	and	a		; done?
+03aa  20f7         1015 	jr	nz,fix.t	; repeat up to FIXSET
+                   1016 
+03ac  a7           1017 fix.p:	and	a		; FIXSET satisfied?
+03ad  ca710b       1018 	jp	z,rest0		; YES! then done
+                   1019 
+                   1020 ; Now we check for width error caused by a FIXSET to great to format large
+                   1021 ;  numbers
+                   1022 
+03b0  fe05         1023 	cp	5		; 5 or 6 here spells trouble!
+03b2  3807         1024 	jr	c,fix.o		; NO! then continue
+                   1025 
+03b4  3e04         1026 	ld	a,4		; truncate FIXSET
+                   1027 
+03b6  21c800       1028 	ld	hl,flags
+03b9  cbe6         1029 	set	4,(hl)		; indicate format error
+                   1030 
+03bb  eb           1031 fix.o:	ex	de,hl
+03bc  3630         1032 	ld	(hl),'0'	; fill with trailing zero
+03be  23           1033 	inc	hl
+03bf  eb           1034 	ex	de,hl
+                   1035 
+03c0  3d           1036 	dec	a		; countdown to FIXSET
+03c1  18e9         1037 	jr	fix.p
+                   1038 
+                   1039 ; now scientific notation is required!  If FIXSET is not -1 then we set
+                   1040 ;  the Format Error flag before performing the conversion in notation.
+                   1041 
+03c3  3ac700       1042 fix.e:	ld	a,(fixset)
+03c6  fe07         1043 	cp	7		; set to 0-6?
+03c8  302c         1044 	jr	nc,sci0		; NO! then notation allowed
+                   1045 
+03ca  21c800       1046 	ld	hl,flags
+03cd  cbe6         1047 	set	4,(hl)		; indicate notation error
+03cf  1825         1048 	jr	sci0		; now convert notation
+                   1049 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 24
+
+
+                   1050 ; code transfers balance of value and truncates trailing zeroes and
+                   1051 ;  drops the dangling decimal point if necessary.
+                   1052 
+03d1  78           1053 suppss:	ld	a,b
+03d2  b1           1054 	or	c		; anything left to transfer?
+03d3  2802         1055 	jr	z,trunc		; NO! then no transfer
+                   1056 
+03d5  edb0         1057 	ldir			; transfer the balance
+                   1058 
+                   1059 ; Now we drop trailing zeroes and the trailing decimal point if necessary
+                   1060 
+03d7  eb           1061 trunc:	ex	de,hl
+03d8  2b           1062 val.l:	dec	hl		; pointer to last character
+03d9  7e           1063 	ld	a,(hl)		; obtain character
+03da  fe30         1064 	cp	'0'		; a zero?
+03dc  2004         1065 	jr	nz,val.d	; NO! then one more check
+                   1066 
+03de  3620         1067 	ld	(hl),' '	; overstrike with space
+03e0  18f6         1068 	jr	val.l		; loop further back
+                   1069 
+03e2  fe2e         1070 val.d:	cp	'.'		; no dangling decimal point
+03e4  c2710b       1071 	jp	nz,rest0	; NO! then done
+                   1072 
+03e7  3620         1073 	ld	(hl),' '	; overstrike
+03e9  c3710b       1074 	jp	rest0		; done
+                   1075 
+                   1076 ; **********
+                   1077 ; Subroutine: _sci
+                   1078 ; **********
+                   1079 
+                   1080 ; Routine returns a 12 character ASCII string for the selected register.
+                   1081 ;  Reg.a defines the desired register.  Reg.hl specifies the
+                   1082 ;  destination address.  Format is scientific +0.00000E+00
+                   1083 
+03ec  e5           1084 _sci:	push	hl		; save string destination address
+                   1085 
+03ed  cd500b       1086 	call	savreg		; save registers
+03f0  cd5f04       1087 	call	gdig		; extract significant digits and exponent
+                   1088 
+03f3  e1           1089 	pop	hl
+03f4  e3           1090 	ex	(sp),hl		; string address
+03f5  eb           1091 	ex	de,hl
+                   1092 
+                   1093 ; now format in scientific notation
+                   1094 
+03f6  21cb00       1095 sci0:	ld	hl,sdigs	; sign and digits
+03f9  010200       1096 	ld	bc,2
+03fc  edb0         1097 	ldir			; transfer sign and the first digit
+                   1098 
+03fe  3acc00       1099 	ld	a,(sdigs+1)	; leading digit
+0401  fe30         1100 	cp	'0'		; zero? (then all are)
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 25
+
+
+0403  2807         1101 	jr	z,sci.z		; YES! then do not adjust exponent
+                   1102 
+0405  3ac900       1103 	ld	a,(texp)
+0408  3d           1104 	dec	a		; account for placement of decimal point
+0409  32c900       1105 	ld	(texp),a
+                   1106 
+040c  3e2e         1107 sci.z:	ld	a,'.'		; insert decimal point
+040e  12           1108 	ld	(de),a
+040f  13           1109 	inc	de
+                   1110 
+0410  010500       1111 	ld	bc,5
+0413  edb0         1112 	ldir			; transfer balance of digits
+                   1113 
+0415  eb           1114 	ex	de,hl
+                   1115 
+                   1116 ; drop trailing zeroes
+                   1117 
+0416  0604         1118 	ld	b,4
+0418  3e30         1119 	ld	a,'0'
+041a  2b           1120 sci.z1:	dec	hl
+041b  be           1121 	cp	(hl)		; zero?
+041c  2002         1122 	jr	nz,sci.z0	; NO! then done
+041e  10fa         1123 	djnz	sci.z1
+                   1124 
+0420  23           1125 sci.z0:	inc	hl
+0421  3645         1126 	ld	(hl),'E'	; insert exponent
+0423  23           1127 	inc	hl
+                   1128 
+0424  3ac900       1129 	ld	a,(texp)	; obtain exponent
+0427  cb7f         1130 	bit	7,a		; positive?
+0429  3e2b         1131 	ld	a,'+'
+042b  280a         1132 	jr	z,sci.e		; YES! then use plus sign
+                   1133 
+042d  3ac900       1134 	ld	a,(texp)
+0430  ed44         1135 	neg			; negate exponent
+0432  32c900       1136 	ld	(texp),a
+                   1137 
+0435  3e2d         1138 	ld	a,'-'
+0437  77           1139 sci.e:	ld	(hl),a
+0438  23           1140 	inc	hl
+                   1141 
+                   1142 ; Now display the exponent as two decimal digits
+                   1143 
+0439  3ac900       1144 	ld	a,(texp)
+043c  0e0a         1145 	ld	c,10		; tens digit
+043e  cd4904       1146 	call	tdigit
+0441  0e01         1147 	ld	c,1		; units digit
+0443  cd4904       1148 	call	tdigit
+0446  c3710b       1149 	jp	rest0		; restore all registers
+                   1150 
+0449  062f         1151 tdigit:	ld	b,'0'-1
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 26
+
+
+                   1152 
+044b  04           1153 tdig0:	inc	b
+044c  91           1154 	sub	c
+044d  30fc         1155 	jr	nc,tdig0
+                   1156 
+044f  81           1157 	add	c
+0450  70           1158 	ld	(hl),b
+0451  23           1159 	inc	hl
+0452  c9           1160 	ret
+                   1161 
+                   1162 ; Routine multiplies fractional part of FP0 by two.
+                   1163 
+0453  21d200       1164 mul.2:	ld	hl,fp0
+0456  0605         1165 	ld	b,5
+0458  af           1166 	xor	a		; clear CY
+                   1167 
+0459  cb16         1168 mul.t:	rl	(hl)
+045b  23           1169 	inc	hl
+045c  10fb         1170 	djnz	mul.t
+045e  c9           1171 	ret
+                   1172 
+                   1173 ; Routine extracts the sign and first six significant digits into a buffer.
+                   1174 ;  The power of ten exponent is also calculated and saved.  Reg. a defines
+                   1175 ;  the register of interest.
+                   1176 
+045f  21cb00       1177 gdig:	ld	hl,sdigs	; buffer for significant digits and sign
+0462  e5           1178 	push	hl
+                   1179 
+0463  a7           1180 grot:	and	a		; FP0 has register of interest?
+0464  2806         1181 	jr	z,grot0		; YES! then no roll up
+                   1182 
+0466  cd7a01       1183 	call	_rollu		; get next register
+0469  3d           1184 	dec	a		; countdown
+046a  18f7         1185 	jr	grot
+                   1186 
+046c  21c900       1187 grot0:	ld	hl,texp		; variable used to acquire exponent
+046f  3600         1188 	ld	(hl),0
+                   1189 
+                   1190 ; First we check for FP zero.
+                   1191 
+0471  3ad600       1192 	ld	a,(fp0+4)	; exponent
+0474  a7           1193 	and	a		; FP zero?
+0475  200d         1194 	jr	nz,gdig0	; NO! then proceed to extract value
+                   1195 
+                   1196 ; in the case of a FP zero we return zeroes.
+                   1197 
+0477  e1           1198 	pop	hl		; obtain digits buffer
+0478  3620         1199 	ld	(hl),' '	; no sign
+047a  23           1200 	inc	hl
+                   1201 
+047b  0606         1202 	ld	b,6
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 27
+
+
+047d  3630         1203 gzerf:	ld	(hl),'0'	; fill with zeros
+047f  23           1204 	inc	hl
+0480  10fb         1205 	djnz	gzerf
+                   1206 
+0482  af           1207 	xor	a		; return Z set
+0483  c9           1208 	ret
+                   1209 
+                   1210 ; Now we determine the sign of the FP value and enter a '-' if necessary.
+                   1211 
+0484  21d500       1212 gdig0:	ld	hl,fp0+3
+0487  cb7e         1213 	bit	7,(hl)		; a negative value?
+0489  cbfe         1214 	set	7,(hl)		; set bit as normalized
+                   1215 
+048b  3e20         1216 	ld	a,' '
+048d  2802         1217 	jr	z,dig.p		; NO! then do not enter a '-'
+                   1218 
+048f  3e2d         1219 	ld	a,'-'		; we insert a negative sign in the display
+0491  e3           1220 dig.p:	ex	(sp),hl		; get display pointer
+0492  77           1221 	ld	(hl),a		; place sign
+0493  23           1222 	inc	hl		; bump pointer
+0494  e3           1223 	ex	(sp),hl
+                   1224 
+                   1225 ; Before we can extract the various significant digits we must determine the 
+                   1226 ;  base 10 exponent.  First if the value is less than 1.00 we multiply by
+                   1227 ;  10 until it is greater than one and count the multiplications.
+                   1228 
+0495  3ad600       1229 dig.c:	ld	a,(fp0+4)	; exponent
+0498  fe5f         1230 	cp	05fh		; greater than 1.00E-10?
+049a  3012         1231 	jr	nc,dig.c2	; YES! then no need to multiply
+                   1232 
+049c  218005       1233 	ld	hl,ten2
+049f  cd110b       1234 	call	push
+04a2  cd7c06       1235 	call	_mul		; multiply by 1.00E+10
+                   1236 
+04a5  21c900       1237 	ld	hl,texp
+04a8  7e           1238 	ld	a,(hl)
+04a9  d60a         1239 	sub	10		; decrease exponent
+04ab  77           1240 	ld	(hl),a
+04ac  18e7         1241 	jr	dig.c
+                   1242 
+04ae  3ad600       1243 dig.c2:	ld	a,(fp0+4)	; exponent
+04b1  fe81         1244 	cp	081h		; greater than one?
+04b3  300f         1245 	jr	nc,dig.g	; YES! then no need to multiply
+                   1246 
+04b5  217c05       1247 	ld	hl,ten
+04b8  cd110b       1248 	call	push
+04bb  cd7c06       1249 	call	_mul		; multiply by 10.00
+                   1250 
+04be  21c900       1251 	ld	hl,texp
+04c1  35           1252 	dec	(hl)		; decrease exponent
+04c2  18ea         1253 	jr	dig.c2
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 28
+
+
+                   1254 
+                   1255 ; Now the value is greater than 1.00, maybe it was originally, now we divide
+                   1256 ;  by 10.00s until the value is between 0.1 and 0.9 inclusive.
+                   1257 
+04c4  3ad600       1258 dig.g:	ld	a,(fp0+4)	; exponent
+04c7  feb3         1259 	cp	0b3h		; less than 1.00E-10?
+04c9  3812         1260 	jr	c,dig.g2	; YES! then we check next
+                   1261 
+04cb  218005       1262 	ld	hl,ten2
+04ce  cd110b       1263 	call	push
+04d1  cd0a07       1264 	call	_div		; divide by 1.00E+10
+                   1265 
+04d4  21c900       1266 	ld	hl,texp
+04d7  7e           1267 	ld	a,(hl)
+04d8  c60a         1268 	add	10		; increase exponent
+04da  77           1269 	ld	(hl),a
+04db  18e7         1270 	jr	dig.g
+                   1271 
+04dd  3ad600       1272 dig.g2:	ld	a,(fp0+4)	; exponent
+04e0  fe81         1273 	cp	081h		; less than one?
+04e2  380f         1274 	jr	c,dig.r		; YES! then we are ready to obtain digits
+                   1275 
+04e4  217c05       1276 	ld	hl,ten
+04e7  cd110b       1277 	call	push
+04ea  cd0a07       1278 	call	_div		; divide by ten
+                   1279 
+04ed  21c900       1280 	ld	hl,texp
+04f0  34           1281 	inc	(hl)		; increase exponent
+04f1  18ea         1282 	jr	dig.g2
+                   1283 
+                   1284 ; Now we must perform some kind of rounding operation.  Here we must take
+                   1285 ;  FIXSET into account as it will dictate how many of the significant
+                   1286 ;  digits will be used.
+                   1287 
+04f3  3ac700       1288 dig.r:	ld	a,(fixset)
+04f6  fe06         1289 	cp	6		; set 0-5?
+04f8  3004         1290 	jr	nc,goro		; NO! then all digits used
+                   1291 
+04fa  21c900       1292 	ld	hl,texp
+04fd  86           1293 	add	(hl)		; determine number of digits to be used
+                   1294 
+04fe  219c05       1295 goro:	ld	hl,fixr6	; 0.0000005 (default rounding)
+0501  fe06         1296 	cp	6		; valid number of digits?
+0503  3009         1297 	jr	nc,noro		; NO! then round to default
+                   1298 
+0505  6f           1299 	ld	l,a		; convert to word
+0506  2600         1300 	ld	h,0
+0508  29           1301 	add	hl,hl		; multiply by 4
+0509  29           1302 	add	hl,hl
+                   1303 
+050a  118405       1304 	ld	de,fixr		; address table
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 29
+
+
+050d  19           1305 	add	hl,de		; pointer to proper roundoff value
+                   1306 
+050e  cd110b       1307 noro:	call	push		; half of the least significant digit
+0511  cda805       1308 	call	_add		; added to value to perform round off
+                   1309 
+                   1310 ; Now we need to check that we haven't exceeded one with the round off
+                   1311 
+0514  3ad600       1312 	ld	a,(fp0+4)	; exponent
+0517  fe81         1313 	cp	081h		; greater than one
+0519  380d         1314 	jr	c,dig.m		; NO! then we may proceed
+                   1315 
+051b  217c05       1316 	ld	hl,ten
+051e  cd110b       1317 	call	push
+0521  cd0a07       1318 	call	_div		; divide by ten
+                   1319 
+0524  21c900       1320 	ld	hl,texp
+0527  34           1321 	inc	(hl)		; increase exponent
+                   1322 
+                   1323 ; Now scale mantissa to unity - so that we have the real decimal point
+                   1324 ;  just to the left of the most significant bit.
+                   1325 
+0528  3ad600       1326 dig.m:	ld	a,(fp0+4)	; exponent
+052b  fe80         1327 	cp	080h		; unity scale?
+052d  2811         1328 	jr	z,dig.u
+                   1329 
+                   1330 ; shift mantissa right to scale
+                   1331 
+052f  21d500       1332 	ld	hl,fp0+3	; MSB of mantissa
+0532  0604         1333 	ld	b,4		; mantissa and guard byte
+0534  af           1334 	xor	a		; clear CY
+                   1335 
+0535  cb1e         1336 dig.s:	rr	(hl)		; shift
+0537  2b           1337 	dec	hl
+0538  10fb         1338 	djnz	dig.s
+                   1339 
+053a  21d600       1340 	ld	hl,fp0+4	; address exponent
+053d  34           1341 	inc	(hl)		; adjust exponent
+053e  18e8         1342 	jr	dig.m		; repeat check
+                   1343 
+                   1344 ; now generate the 6 most significant digits
+                   1345 
+0540  0e06         1346 dig.u:	ld	c,6		; display six significant digits
+0542  c5           1347 dig.l:	push	bc
+                   1348 
+0543  af           1349 	xor	a
+0544  32d600       1350 	ld	(fp0+4),a	; clear MSB of FP0 (exponent discarded)
+                   1351 
+0547  21d300       1352 	ld	hl,fp0+1
+054a  111401       1353 	ld	de,fpy+1
+054d  010400       1354 	ld	bc,4
+0550  edb0         1355 	ldir
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 30
+
+
+                   1356 
+0552  cd5304       1357 	call	mul.2
+0555  cd5304       1358 	call	mul.2
+                   1359 
+0558  21d300       1360 	ld	hl,fp0+1
+055b  111401       1361 	ld	de,fpy+1
+055e  0604         1362 	ld	b,4
+0560  af           1363 	xor	a		; clear CY
+                   1364 
+0561  1a           1365 dig.a:	ld	a,(de)
+0562  8e           1366 	adc	(hl)
+0563  77           1367 	ld	(hl),a
+                   1368 
+0564  13           1369 	inc	de
+0565  23           1370 	inc	hl
+0566  10f9         1371 	djnz	dig.a
+                   1372 
+0568  cd5304       1373 	call	mul.2
+                   1374 
+056b  3ad600       1375 	ld	a,(fp0+4)
+056e  c630         1376 	add	'0'
+                   1377 
+0570  c1           1378 	pop	bc
+                   1379 
+0571  e3           1380 	ex	(sp),hl
+0572  77           1381 	ld	(hl),a
+0573  23           1382 	inc	hl
+0574  e3           1383 	ex	(sp),hl
+                   1384 
+0575  0d           1385 	dec	c		; next digit?
+0576  20ca         1386 	jr	nz,dig.l	; YES! then loop
+                   1387 
+0578  e1           1388 	pop	hl		; discard digits pointer
+                   1389 
+0579  f601         1390 	or	1		; return NZ
+057b  c9           1391 	ret			; value ready
+                   1392 
+                   1393 ; constant FP values
+                   1394 
+057c  00002084     1395 ten:	defb	000h,000h,020h,084h
+0580  f90215a2     1396 ten2:	defb	0f9h,002h,015h,0a2h
+                   1397 
+                   1398 ; This table supplies roundoff constants (w/o sign)
+                   1399 
+0584  01008080     1400 fixr:	defb	001h,000h,080h,080h	; 0.5000000
+0588  cdcccc7c     1401 	defb	0cdh,0cch,0cch,07ch	; 0.0500000
+058c  0bd7a379     1402 	defb	00bh,0d7h,0a3h,079h	; 0.0050000
+0590  6f128376     1403 	defb	06fh,012h,083h,076h	; 0.0005000
+0594  18b7d172     1404 	defb	018h,0b7h,0d1h,072h	; 0.0000500
+0598  adc5a76f     1405 	defb	0adh,0c5h,0a7h,06fh	; 0.0000050
+059c  be37866c     1406 fixr6:	defb	0beh,037h,086h,06ch	; 0.0000005
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 31
+
+
+                   1407 
+                   1408 ; ***************************************************************************
+                   1409 ; 			Main Mathematical Routines
+                   1410 ; ***************************************************************************
+                   1411 
+                   1412 ; **********
+                   1413 ; Subroutine: _sub
+                   1414 ; **********
+                   1415 
+                   1416 ; Routine removes FP0 and FP1 from the stack, calculates FP1-FP0 and returns
+                   1417 ;  the result to the stack.
+                   1418 
+                   1419 ; We perform the subtraction by changing the sign of FP0 and proceeding with
+                   1420 ;  an addition.
+                   1421 
+05a0  cd330b       1422 _sub:	call	savex		; remember last x
+                   1423 
+05a3  cdc001       1424 	call	_chs		; change the sign of FP0
+05a6  1803         1425 	jr	add.g		; now perform the addition
+                   1426 
+                   1427 ; **********
+                   1428 ; Subroutine: _add
+                   1429 ; **********
+                   1430 
+                   1431 ; Routine removes FP0 and FP1 values from the stack, calculates the sum
+                   1432 ;  and returns that to the stack.
+                   1433 
+05a8  cd330b       1434 _add:	call	savex		; remembers last x
+                   1435 
+                   1436 ; ADD GO
+                   1437 ; Here we begin the addition.  Note that this is an entry point for _SUB.
+                   1438 ;  Both FP0 and FP1 are normalized FP values with their signs encoded
+                   1439 ;  in the MSB of the mantissa.  Here we decode the signs and save them
+                   1440 ;  for later use.  The MSB bit 7 of the mantissa is set to 1 as required
+                   1441 ;  for normalized values.  The mantissa of FP0 is extended to 32 bits to
+                   1442 ;  preserve accuracy by the guard byte.
+                   1443 
+05ab  3ad600       1444 add.g:	ld	a,(fp0+4)
+05ae  a7           1445 	and	a		; zero?
+05af  ca270b       1446 	jp	z,pop		; YES! then return value in FP1
+                   1447 
+05b2  3adb00       1448 	ld	a,(fp1+4)
+05b5  a7           1449 	and	a		; zero?
+05b6  cabc07       1450 	jp	z,discard	; YES! then return value in FP0
+                   1451 
+05b9  21d500       1452 	ld	hl,fp0+3
+05bc  7e           1453 	ld	a,(hl)
+05bd  e680         1454 	and	080h		; obtain sign of FP0
+05bf  32c500       1455 	ld	(sign0),a
+                   1456 
+05c2  cbfe         1457 	set	7,(hl)		; sets MSB bit 7 to one
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 32
+
+
+                   1458 
+05c4  21da00       1459 	ld	hl,fp1+3
+05c7  7e           1460 	ld	a,(hl)
+05c8  e680         1461 	and	080h		; obtain sign of FP1
+05ca  32c600       1462 	ld	(sign1),a
+                   1463 
+05cd  cbfe         1464 	set	7,(hl)		; sets MSB bit 7 to one
+                   1465 
+05cf  af           1466 	xor	a
+05d0  32d200       1467 	ld	(fp0),a		; initialize the guard bytes
+05d3  32d700       1468 	ld	(fp1),a
+                   1469 
+                   1470 ; ADD LOOP
+                   1471 ; Here we loop until both exponents are equal.  The smaller value is shifted
+                   1472 ;  to achieve this equality.
+                   1473 
+05d6  21d600       1474 add.l:	ld	hl,fp0+4	; address FP0's exponent
+05d9  3adb00       1475 	ld	a,(fp1+4)	; obtain FP1's exponent
+05dc  be           1476 	cp	(hl)		; are exponents equal?
+05dd  2839         1477 	jr	z,add.f		; YES! then we can perform the addition
+05df  300f         1478 	jr	nc,add.ln	; FP1>FP0 then no swap
+                   1479 
+                   1480 ; We want the smaller value in FP0 so that it is shifted.
+                   1481 
+05e1  cdae01       1482 	call	_swap		; swap FP0 and FP1
+                   1483 
+05e4  21c500       1484 	ld	hl,sign0 	; exchange signs
+05e7  4e           1485 	ld	c,(hl)
+05e8  3ac600       1486 	ld	a,(sign1)
+05eb  77           1487 	ld	(hl),a
+05ec  79           1488 	ld	a,c
+05ed  32c600       1489 	ld	(sign1),a
+                   1490 
+                   1491 ; Now we scale the fractional part of FP0 by 1/2 and increase its exponent by
+                   1492 ;  1.  The value remains unchanged, however, we need to get the exponents of
+                   1493 ;  both FP0 and FP1 to be identical in order to perform the addition.
+                   1494 
+05f0  21d500       1495 add.ln:	ld	hl,fp0+3	; MSB of mantissa
+05f3  0604         1496 	ld	b,4		; three bytes and the guard byte
+05f5  af           1497 	xor	a		; clear CY
+                   1498 
+                   1499 ; ADD SHIFT
+                   1500 ; Perform shift through the mantissa
+                   1501 
+05f6  cb1e         1502 add.s:	rr	(hl)		; divide by two (CY gets bit 0)
+05f8  2b           1503 	dec	hl		; to next byte
+05f9  10fb         1504 	djnz	add.s		; complete shift through mantissa
+                   1505 
+05fb  21d600       1506 	ld	hl,fp0+4	; address exponent
+05fe  34           1507 	inc	(hl)		; increased
+                   1508 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 33
+
+
+                   1509 ; If the mantissa of the smaller value becomes 0 then the result of the
+                   1510 ;  addition is the larger FP value unchanged.  We check here for a zero
+                   1511 ;  mantissa
+                   1512 
+05ff  21d500       1513 	ld	hl,fp0+3
+0602  0604         1514 	ld	b,4		; mantissa and guard byte
+0604  af           1515 	xor	a		; clear test register
+                   1516 
+                   1517 ; ADD ZERO
+                   1518 ; Loop and check for zero mantissa
+                   1519 
+0605  86           1520 add.z:	add	(hl)		; non-zero mantissa?
+0606  20ce         1521 	jr	nz,add.l	; YES! then continue will exponent check
+                   1522 
+0608  2b           1523 	dec	hl		; to next byte
+0609  10fa         1524 	djnz	add.z		; check next byte in mantissa
+                   1525 
+                   1526 ; The smaller FP value causes an insignificant change to the larger value.
+                   1527 ;  We return the larger value as our result.  First we restore the sign
+                   1528 ;  in FP1 (larger value).
+                   1529 
+060b  21da00       1530 	ld	hl,fp1+3	; mantissa MSB
+060e  3ac600       1531 	ld	a,(sign1)	; sign of FP1
+0611  cbbe         1532 	res	7,(hl)		; ready to receive sign
+0613  b6           1533 	or	(hl)		; encode sign
+0614  77           1534 	ld	(hl),a		; placed back in FP1
+                   1535 
+0615  c3270b       1536 	jp	pop		; discard FP0 and return
+                   1537 
+                   1538 ; ADD FRACTIONS
+                   1539 ; Now perform mantissa addition.  This proceeds differently if the signs of
+                   1540 ;  FP0 and FP1 are not the same.
+                   1541 
+0618  21c500       1542 add.f:	ld	hl,sign0	; address sign of FP0
+061b  3ac600       1543 	ld	a,(sign1)	; get sign of FP1
+061e  ae           1544 	xor	(hl)		; are signs different?
+061f  2029         1545 	jr	nz,add.d	; YES! then process accordingly
+                   1546 
+                   1547 ; Here we add the mantissas
+                   1548 
+0621  21d200       1549 	ld	hl,fp0
+0624  11d700       1550 	ld	de,fp1
+0627  0604         1551 	ld	b,4		; length of mantissa
+0629  af           1552 	xor	a		; clear CY
+                   1553 
+                   1554 ; ADD TOTAL
+                   1555 ; loop adds mantissas
+                   1556 
+062a  1a           1557 add.t:	ld	a,(de)		; byte from FP1
+062b  13           1558 	inc	de
+                   1559 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 34
+
+
+062c  8e           1560 	adc	(hl)		; add byte from FP0
+062d  77           1561 	ld	(hl),a		; result goes in FP0
+062e  23           1562 	inc	hl		; next byte
+062f  10f9         1563 	djnz	add.t
+0631  3011         1564 	jr	nc,add.r	; no carry then we need only round off
+                   1565 
+                   1566 ; Now we scale the fractional part of FP0 by 1/2 and increase its exponent by
+                   1567 ;  1.  The value remains unchanged.
+                   1568 
+0633  21d500       1569 	ld	hl,fp0+3	; MSB of mantissa
+0636  0604         1570 	ld	b,4		; three bytes and the guard byte
+0638  af           1571 	xor	a		; clear CY
+                   1572 
+                   1573 ; ADD SHIFT
+                   1574 ; Perform shift through the mantissa
+                   1575 
+0639  cb1e         1576 add.s2:	rr	(hl)		; divide by two (CY gets bit 0)
+063b  2b           1577 	dec	hl		; to next byte
+063c  10fb         1578 	djnz	add.s2		; complete shift through mantissa
+                   1579 
+063e  21d600       1580 	ld	hl,fp0+4	; address exponent
+0641  34           1581 	inc	(hl)		; increased
+0642  2832         1582 	jr	z,add.o		; if zero then overflow has occured
+                   1583 	
+                   1584 ; ADD ROUND
+                   1585 ; Discard FP1 and check for round off
+                   1586 
+0644  cdbc07       1587 add.r:	call	discard		; drop FP1
+0647  c3ef07       1588 	jp	round		; perform rounding and return
+                   1589 
+                   1590 ; ADD DIFFERENT
+                   1591 ; Perform addition of values with differing signs
+                   1592 
+064a  21d700       1593 add.d:	ld	hl,fp1
+064d  11d200       1594 	ld	de,fp0
+0650  0604         1595 	ld	b,4		; length of mantissa
+0652  af           1596 	xor	a		; clear CY
+                   1597 
+                   1598 ; loop subtracts mantissas
+                   1599 
+0653  1a           1600 add.d0:	ld	a,(de)		; byte from FP0
+0654  9e           1601 	sbc	(hl)		; sub byte from FP1
+0655  12           1602 	ld	(de),a		; result goes in FP0
+0656  13           1603 	inc	de		; next bytes
+0657  23           1604 	inc	hl
+0658  10f9         1605 	djnz	add.d0
+065a  3014         1606 	jr	nc,add.d1	; no borrow then we do not negate
+                   1607 
+                   1608 ; here we must negate the result
+                   1609 
+065c  21d200       1610 	ld	hl,fp0		; address FP0
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 35
+
+
+065f  0604         1611 	ld	b,4		; includes guard byte
+0661  af           1612 	xor	a		; clear CY
+                   1613 
+0662  3e00         1614 add.dn:	ld	a,0
+0664  9e           1615 	sbc	(hl)		; negate
+0665  77           1616 	ld	(hl),a		; result placed back in FP0
+0666  23           1617 	inc	hl		; next byte
+0667  10f9         1618 	djnz	add.dn		; loop
+                   1619 
+0669  21c500       1620 	ld	hl,sign0
+066c  3e80         1621 	ld	a,80h
+066e  ae           1622 	xor	(hl)		; flip the sign
+066f  77           1623 	ld	(hl),a
+                   1624 
+                   1625 ; Here we discard FP1 and check for a zero result
+                   1626 
+0670  cdbc07       1627 add.d1:	call	discard		; drop FP1
+0673  c3c807       1628 	jp	norm		; normalize and return
+                   1629 
+                   1630 ; Here overflow has occured.
+                   1631 
+0676  cdbc07       1632 add.o:	call	discard		; drop FP1
+0679  c31608       1633 	jp	oflow		; report overflow
+                   1634 
+                   1635 ; **********
+                   1636 ; Subroutine: _mul
+                   1637 ; **********
+                   1638 
+                   1639 ; Routine removes FP0 and FP1 from the stack, calculates their product and
+                   1640 ;  returns the result to the stack.
+                   1641 
+067c  cd330b       1642 _mul:	call	savex
+                   1643 
+                   1644 ; check for zeros
+                   1645 
+067f  3ad600       1646 	ld	a,(fp0+4)
+0682  a7           1647 	and	a		; zero?
+0683  2837         1648 	jr	z,mul.uf	; YES! then result is zero
+                   1649 
+0685  3adb00       1650 	ld	a,(fp1+4)
+0688  a7           1651 	and	a		; zero?
+0689  2831         1652 	jr	z,mul.uf	; YES! then result is zero
+                   1653 
+                   1654 ; obtain the sign of the result by exclusive-or
+                   1655 
+068b  21da00       1656 	ld	hl,fp1+3	; mantissa MSB
+068e  3ad500       1657 	ld	a,(fp0+3)	; mantissa MSB
+0691  ae           1658 	xor	(hl)
+0692  e680         1659 	and	080h		; mask only the sign
+0694  32c500       1660 	ld	(sign0),a	; saved here
+                   1661 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 36
+
+
+0697  cbfe         1662 	set	7,(hl)		; set for normalized value
+                   1663 
+0699  21d500       1664 	ld	hl,fp0+3
+069c  cbfe         1665 	set	7,(hl)		; set for normalized value
+                   1666 
+                   1667 ; FP0 becomes the multiplicand and is copied to FPY
+                   1668 
+069e  21d200       1669 	ld	hl,fp0
+06a1  111301       1670 	ld	de,fpy
+06a4  010500       1671 	ld	bc,5
+06a7  edb0         1672 	ldir
+                   1673 
+                   1674 ; obtain exponent of result by adding the two exponents
+                   1675 
+06a9  21d600       1676 	ld	hl,fp0+4	; exponent of FP0
+06ac  3adb00       1677 	ld	a,(fp1+4)	; exponent of FP1
+06af  86           1678 	add	(hl)		; added together
+                   1679 
+                   1680 ; Now we need to detect overflow and underflow situations.  Since we are in
+                   1681 ;  excess 128 notation we'll need to adjust this sum by 128 before using
+                   1682 ;  it in our result.  First we check for carry.  A carry here does not
+                   1683 ;  necessarily mean that we have overflowed, however, if there was a carry
+                   1684 ;  and the most significant bit is set then we have an overflow.
+                   1685 
+06b0  3006         1686 	jr	nc,mul.u	; not overflow - go check underflow
+06b2  cb7f         1687 	bit	7,a		; overflow?
+06b4  204e         1688 	jr	nz,mul.o	; YES! then report overflow
+06b6  180a         1689 	jr	mul.p		; otherwise proceed with product
+                   1690 
+                   1691 ; Here we check for underflow.  There hasn't been a carry and if the most
+                   1692 ;  significant bit of the sum is not set then there has been an underflow.
+                   1693 
+06b8  cb7f         1694 mul.u:	bit	7,a		; underflow?
+06ba  2006         1695 	jr	nz,mul.p	; NO! then proceed with product
+                   1696 
+                   1697 ; underflow has occured
+                   1698 
+06bc  cd5e01       1699 mul.uf:	call	_clx		; we return 0.000 on underflow
+06bf  c3bc07       1700 	jp	discard		; discards FP1 before returning
+                   1701 
+06c2  c680         1702 mul.p:	add	128		; offset to adjust for notation
+06c4  77           1703 	ld	(hl),a		; placed here in result
+                   1704 
+                   1705 ; Now we proceed to perform the multiplication of mantissas using the
+                   1706 ;  partial product method.  First we zero the result accumulator.
+                   1707 ;  Remember that the multiplicand is in FPY.
+                   1708 
+06c5  21d200       1709 	ld	hl,fp0		; 32 bit result
+06c8  11d300       1710 	ld	de,fp0+1
+06cb  010300       1711 	ld	bc,3
+06ce  3600         1712 	ld	(hl),0
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 37
+
+
+06d0  edb0         1713 	ldir
+                   1714 
+06d2  0e18         1715 	ld	c,24		; loop for 24 bits of multiplier mantissa
+                   1716 
+                   1717 ; Rotate multiplier right to obtain bit
+                   1718 
+06d4  21da00       1719 mul.l:	ld	hl,fp1+3	; address MSB of multiplier
+06d7  0603         1720 	ld	b,3		; size of mantissa
+06d9  af           1721 	xor	a		; clear CY
+                   1722 
+06da  cb1e         1723 mul.s:	rr	(hl)		; rotate
+06dc  2b           1724 	dec	hl
+06dd  10fb         1725 	djnz	mul.s
+06df  3010         1726 	jr	nc,mul.n	; NO CY! - do not add multiplicand
+                   1727 
+                   1728 ; Now add the multiplicand to the result
+                   1729 
+06e1  21d300       1730 	ld	hl,fp0+1
+06e4  111401       1731 	ld	de,fpy+1
+06e7  0603         1732 	ld	b,3		; just the mantissa
+06e9  af           1733 	xor	a		; clear CY
+                   1734 
+06ea  1a           1735 mul.a:	ld	a,(de)		; byte from FP1
+06eb  13           1736 	inc	de
+                   1737 
+06ec  8e           1738 	adc	(hl)		; add from FP0
+06ed  77           1739 	ld	(hl),a		; result placed back here
+06ee  23           1740 	inc	hl
+06ef  10f9         1741 	djnz	mul.a		; loop
+                   1742 
+                   1743 ; Now we shift the result right 1 bit to process the next part of the product.
+                   1744 ;  Note that we preserve the state of the CY from the addition above.  If the
+                   1745 ;  addition was bypassed then CY is clear already.
+                   1746 
+06f1  21d500       1747 mul.n:	ld	hl,fp0+3	; MSB of result
+06f4  0604         1748 	ld	b,4		; mantissa and guard byte
+                   1749 
+06f6  cb1e         1750 mul.c:	rr	(hl)		; rotate
+06f8  2b           1751 	dec	hl
+06f9  10fb         1752 	djnz	mul.c
+                   1753 
+06fb  0d           1754 	dec	c		; next multiplier bit?
+06fc  20d6         1755 	jr	nz,mul.l	; YES! then continue to loop
+                   1756 
+                   1757 ; Here we discard FP1 and test for zero mantissa in the result
+                   1758 
+06fe  cdbc07       1759 	call	discard		; drop FP1
+0701  c3c807       1760 	jp	norm		; normalize and return
+                   1761 
+                   1762 ; Here overflow has occured.
+                   1763 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 38
+
+
+0704  cdbc07       1764 mul.o:	call	discard		; drop FP1
+0707  c31608       1765 	jp	oflow		; report overflow
+                   1766 
+                   1767 ; **********
+                   1768 ; Subroutine: _div
+                   1769 ; **********
+                   1770 
+                   1771 ; Routine removes FP0 and FP1 from the stack, calculates FP1/FP0 and returns
+                   1772 ;  the result to the stack.
+                   1773 
+070a  cd330b       1774 _div:	call	savex
+                   1775 
+                   1776 ; check for zeros
+                   1777 
+070d  3adb00       1778 	ld	a,(fp1+4)
+0710  a7           1779 	and	a		; zero?
+0711  ca270b       1780 	jp	z,pop		; YES! then return zero
+                   1781 
+0714  3ad600       1782 	ld	a,(fp0+4)
+0717  a7           1783 	and	a		; zero?
+0718  2006         1784 	jr	nz,div0		; NO! then perform division
+                   1785 
+                   1786 ; Report Divide by Zero Error
+                   1787 
+071a  21c800       1788 	ld	hl,flags
+071d  cbce         1789 	set	1,(hl)		; set divide by zero flag
+071f  c9           1790 	ret
+                   1791 
+                   1792 ; obtain the sign of the result by exclusive-or
+                   1793 
+0720  21da00       1794 div0:	ld	hl,fp1+3	; mantissa MSB
+0723  3ad500       1795 	ld	a,(fp0+3)	; mantissa MSB
+0726  ae           1796 	xor	(hl)
+0727  e680         1797 	and	080h		; mask only the sign
+0729  32c500       1798 	ld	(sign0),a	; saved here
+                   1799 
+072c  cbfe         1800 	set	7,(hl)		; set for normalized value
+                   1801 
+072e  21d500       1802 	ld	hl,fp0+3
+0731  cbfe         1803 	set	7,(hl)		; set for normalized value
+                   1804 
+                   1805 ; FP0 becomes the divisor and is copied to FPY.
+                   1806 
+0733  21d200       1807 	ld	hl,fp0
+0736  111301       1808 	ld	de,fpy
+0739  010500       1809 	ld	bc,5
+073c  edb0         1810 	ldir
+                   1811 
+                   1812 ; obtain exponent of result by subtracting the two exponents
+                   1813 
+073e  21d600       1814 	ld	hl,fp0+4	; exponent of FP0
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 39
+
+
+0741  3adb00       1815 	ld	a,(fp1+4)	; exponent of FP1
+0744  96           1816 	sub	(hl)		; subtacted
+                   1817 
+                   1818 ; Now we need to detect overflow and underflow situations.  Since we are in
+                   1819 ;  excess 128 notation we'll need to adjust this by 128 before using
+                   1820 ;  it in our result.  First we check for carry.  A no carry here does not
+                   1821 ;  necessarily mean that we have overflowed, however, if there wasn't a carry
+                   1822 ;  and the most significant bit is set then we have an overflow.
+                   1823 
+0745  3806         1824 	jr	c,div.u		; not overflow - go check underflow
+0747  cb7f         1825 	bit	7,a		; overflow?
+0749  206c         1826 	jr	nz,div.o	; YES! then report overflow
+074b  1809         1827 	jr	div.p		; otherwise proceed with division
+                   1828 
+                   1829 ; Here we check for underflow.  There hasn't been a carry and if the most
+                   1830 ;  significant bit of the sum is not set then there has been an underflow.
+                   1831 
+074d  cb7f         1832 div.u:	bit	7,a		; underflow?
+074f  2005         1833 	jr	nz,div.p	; NO! then proceed with product
+                   1834 
+                   1835 ; underflow has occured
+                   1836 
+0751  cd5e01       1837 	call	_clx		; we return 0.000 on underflow
+0754  1866         1838 	jr	discard		; discards FP1 before returning
+                   1839 
+0756  c681         1840 div.p:	add	129		; adjust for notation and division
+0758  285d         1841 	jr	z,div.o		; overflow? then report it!
+                   1842 
+075a  77           1843 	ld	(hl),a		; placed here in result
+                   1844 
+                   1845 ; Now unlike multiplication, we cannot permit division by 0.  This is an
+                   1846 ;  overflow condition that we must check for.
+                   1847 
+075b  3a1701       1848 	ld	a,(fpy+4)	; obtain exponent
+075e  a7           1849 	and	a		; FP zero?
+075f  2856         1850 	jr	z,div.o		; YES! then report overflow!
+                   1851 
+                   1852 ; If the dividend is zero then the result is trivial.
+                   1853 
+0761  3adb00       1854 	ld	a,(fp1+4)	; obtain exponent of dividend
+0764  a7           1855 	and	a		; FP zero?
+0765  284b         1856 	jr	z,div.z		; YES! then return FP zero for a result
+                   1857 
+                   1858 ; now we process each of 32 bits in the divisor.  The FPY guard byte is used
+                   1859 ;  and is initialized here also.  Note that there is no need to
+                   1860 ;  initialize the mantissa of the quotient since we will rotate in an
+                   1861 ;  entirely new mantissa in the following loop.
+                   1862 
+0767  af           1863 	xor	a
+0768  321301       1864 	ld	(fpy),a		; initialize FPY guard
+076b  321701       1865 	ld	(fpy+4),a	; not used as exponent here
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 40
+
+
+076e  32db00       1866 	ld	(fp1+4),a	; also not exponent
+                   1867 
+0771  0e20         1868 	ld	c,32		; set bit count
+                   1869 
+                   1870 ; The first order of business in this loop is to compare the divisor and
+                   1871 ;  the dividend.  If the dividend is large than the divisor we subrtact
+                   1872 ;  the divisor from it and rotate a 1 into the quotient.
+                   1873 
+0773  11db00       1874 div.l:	ld	de,fp1+4	; MSB of dividend
+0776  211701       1875 	ld	hl,fpy+4	; MSB of divisor
+0779  0605         1876 	ld	b,5		; four bytes of mantissa and the guard byte
+                   1877 
+077b  1a           1878 div.c:	ld	a,(de)		; byte from dividend
+077c  be           1879 	cp	(hl)		; divisor > dividend?
+077d  3815         1880 	jr	c,div.n		; YES! then skip subtraction
+077f  2004         1881 	jr	nz,div.g	; divisor < dividend then proceed
+                   1882 
+0781  1b           1883 	dec	de
+0782  2b           1884 	dec	hl
+0783  10f6         1885 	djnz	div.c		; repeat
+                   1886 
+                   1887 ; Now we must subtract the divisor from the dividend to create the dividend 
+                   1888 ;  for the next cycle of the loop.  Note CY is already clear.
+                   1889 
+0785  11d700       1890 div.g:	ld	de,fp1		; dividend
+0788  211301       1891 	ld	hl,fpy		; divisor
+078b  0605         1892 	ld	b,5		; long mantissa and guard byte
+                   1893 
+078d  1a           1894 div.a:	ld	a,(de)		; dividend
+078e  9e           1895 	sbc	(hl)		; minus divisor
+078f  12           1896 	ld	(de),a		; new dividend
+0790  13           1897 	inc	de
+0791  23           1898 	inc	hl
+0792  10f9         1899 	djnz	div.a		; repeat
+                   1900 
+                   1901 ; Now we rotate in the result of this portion of the division.  The carry
+                   1902 ;  flag is complemented so that it is 1 if dividend > divisor and we had
+                   1903 ;  performed the subtraction.
+                   1904 
+0794  21d200       1905 div.n:	ld	hl,fp0		; LSB of quotient
+0797  0604         1906 	ld	b,4		; includes guard byte
+0799  3f           1907 	ccf			; complement CY
+                   1908 
+079a  cb16         1909 div.q:	rl	(hl)		; rotate in CY
+079c  23           1910 	inc	hl		; next byte
+079d  10fb         1911 	djnz	div.q		; repeat
+                   1912 
+                   1913 ; We shift dividend left
+                   1914 
+079f  21d700       1915 	ld	hl,fp1		; LSB of mantissa
+07a2  0605         1916 	ld	b,5		; includes the guard byte
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 41
+
+
+07a4  af           1917 	xor	a		; clear CY
+                   1918 
+07a5  cb16         1919 div.s:	rl	(hl)		; rotate
+07a7  23           1920 	inc	hl
+07a8  10fb         1921 	djnz	div.s		; repeat
+                   1922 
+                   1923 ; Loop to next bit
+                   1924 
+07aa  0d           1925 	dec	c		; another bit to process?
+07ab  20c6         1926 	jr	nz,div.l	; YES! then continue back through loop
+                   1927 
+                   1928 ; Now discard FP1 and Normalize
+                   1929 
+07ad  cdbc07       1930 	call	discard		; drop FP1
+07b0  1816         1931 	jr	norm		; Normalize and return
+                   1932 
+                   1933 ; We return FP zero
+                   1934 
+07b2  cd5e01       1935 div.z:	call	_clx		; FP zero
+07b5  1805         1936 	jr	discard		; discard FP1 and return
+                   1937 
+                   1938 ; Here overflow has occured.
+                   1939 
+07b7  cdbc07       1940 div.o:	call	discard		; drop FP1
+07ba  185a         1941 	jr	oflow		; report overflow
+                   1942 
+                   1943 ; Routine performs POP to discard FP1.  FP0 is undisturbed.
+                   1944 
+                   1945 discard:
+07bc  21dc00       1946 	ld	hl,fp1+5	; source
+07bf  11d700       1947 	ld	de,fp1		; destination
+07c2  013200       1948 	ld	bc,5*(numreg-2)	; 2 full registers are moved
+07c5  edb0         1949 	ldir			; copy
+07c7  c9           1950 	ret	    		; we are done.
+                   1951 
+                   1952 ; Normalizes FP0
+                   1953 
+07c8  21d500       1954 norm:	ld	hl,fp0+3
+07cb  0604         1955 	ld	b,4
+07cd  af           1956 	xor	a
+                   1957 
+07ce  86           1958 norm0:	add	(hl)
+07cf  2006         1959 	jr	nz,norm1	; nonzero so continue normalization
+07d1  2b           1960 	dec	hl		; next byte
+07d2  10fa         1961 	djnz	norm0
+07d4  c35e01       1962 	jp	_clx		; return FP zero
+                   1963 
+07d7  3ad500       1964 norm1:	ld	a,(fp0+3)	; get MSB of mantissa
+07da  e680         1965 	and	080h		; normalized?
+07dc  2011         1966 	jr	nz,round	; YES! then complete by checking round up
+                   1967 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 42
+
+
+07de  21d200       1968 	ld	hl,fp0
+07e1  0604         1969 	ld	b,4		; mantissa and guard byte
+07e3  af           1970 	xor	a		; clear CY
+                   1971 
+07e4  cb16         1972 norm2:	rl	(hl)
+07e6  23           1973 	inc	hl
+07e7  10fb         1974 	djnz	norm2
+                   1975 
+07e9  35           1976 	dec	(hl)		; decrement the exponent
+07ea  20eb         1977 	jr	nz,norm1	; continue normalization
+07ec  c35e01       1978 	jp	_clx		; return FP zero for underflow
+                   1979 
+                   1980 ; Performs round off check for 32 FP0 mantissa
+                   1981 
+07ef  21d200       1982 round:	ld	hl,fp0		; address guard byte
+07f2  cb7e         1983 	bit	7,(hl)		; need round up?
+07f4  2832         1984 	jr	z,sign		; NO! then go finish up
+                   1985 
+                   1986 ; Now we increment the mantissa
+                   1987 
+07f6  21d300       1988 	ld	hl,fp0+1
+07f9  0603         1989 	ld	b,3		; length of mantissa
+07fb  37           1990 	scf			; set CY
+                   1991 
+                   1992 ; loop increments mantissa
+                   1993 
+07fc  3e00         1994 round0:	ld	a,0		; just adds CY
+07fe  8e           1995 	adc	(hl)		; add byte from FP0
+07ff  77           1996 	ld	(hl),a		; result goes in FP0
+0800  3026         1997 	jr	nc,sign		; no carry then we need only finish up
+                   1998 
+0802  23           1999 	inc	hl		; next byte
+0803  10f7         2000 	djnz	round0
+                   2001 
+                   2002 ; Now we scale the fractional part of FP0 by 1/2 and increase its exponent by
+                   2003 ;  1.  The value remains unchanged.
+                   2004 
+0805  21d500       2005 	ld	hl,fp0+3	; MSB of mantissa
+0808  0603         2006 	ld	b,3		; three bytes
+080a  af           2007 	xor	a		; clear CY
+                   2008 
+                   2009 ; Perform shift through the mantissa
+                   2010 
+080b  cb1e         2011 round1:	rr	(hl)		; divide by two (CY gets bit 0)
+080d  2b           2012 	dec	hl		; to next byte
+080e  10fb         2013 	djnz	round1		; complete shift through mantissa
+                   2014 
+0810  21d600       2015 	ld	hl,fp0+4	; address exponent
+0813  34           2016 	inc	(hl)		; increased
+0814  2012         2017 	jr	nz,sign		; no overflow - then just process sign
+                   2018 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 43
+
+
+                   2019 ; Routine return large value and reports overflow
+                   2020 
+0816  21d300       2021 oflow:	ld	hl,fp0+1
+0819  11d400       2022 	ld	de,fp0+2
+081c  010300       2023 	ld	bc,3
+081f  36ff         2024 	ld	(hl),0ffh
+0821  edb0         2025 	ldir			; loads a very large number
+                   2026 
+                   2027 ; now set the overflow flag
+                   2028 
+0823  21c800       2029 	ld	hl,flags
+0826  cbc6         2030 	set	0,(hl)
+                   2031 
+                   2032 ; the returned value does take the correct sign
+                   2033 
+                   2034 ; Routine encodes the sign for FP0
+                   2035 
+0828  21d500       2036 sign:	ld	hl,fp0+3	; mantissa MSB
+082b  3ac500       2037 	ld	a,(sign0)	; sign of FP0
+082e  cbbe         2038 	res	7,(hl)		; ready to receive sign
+0830  b6           2039 	or	(hl)		; encode sign
+0831  77           2040 	ld	(hl),a		; placed back in FP0
+0832  c9           2041 	ret			; done
+                   2042 
+                   2043 ; **********
+                   2044 ; Subroutine: _int
+                   2045 ; **********
+                   2046 
+                   2047 ; Routine takes the integer part of FP0
+                   2048 
+0833  3ad600       2049 _int:	ld	a,(fp0+4)	; obtain the exponent
+0836  fe81         2050 	cp	081h		; value less than 1?
+0838  da5e01       2051 	jp	c,_clx		; YES! then return FP zero
+083b  fe99         2052 	cp	099h		; value too large to have fractional part?
+083d  d0           2053 	ret	nc		; YES! then return unchanged
+                   2054 
+                   2055 ; extract sign
+                   2056 
+083e  21d500       2057 	ld	hl,fp0+3
+0841  7e           2058 	ld	a,(hl)
+0842  cbfe         2059 	set	7,(hl)		; matissa bit set
+0844  e680         2060 	and	080h
+0846  32c500       2061 	ld	(sign0),a
+                   2062 
+                   2063 ; Now we scale the fractional part of FP0 by 1/2 and increase its exponent by
+                   2064 ;  1.  We do this until the exponent is 098h then the mantissa is the
+                   2065 ;  integer part.  All fractional bits are lost
+                   2066 
+0849  3ad600       2067 intc:	ld	a,(fp0+4)	; obtain exponent
+084c  fe98         2068 	cp	098h		; scaled properly?
+084e  2811         2069 	jr	z,intr		; YES! then we have the integer part
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 44
+
+
+                   2070 
+0850  21d500       2071 	ld	hl,fp0+3	; MSB of mantissa
+0853  0603         2072 	ld	b,3		; three bytes
+0855  af           2073 	xor	a		; clear CY
+                   2074 
+                   2075 ; Perform shift through the mantissa
+                   2076 
+0856  cb1e         2077 ints:	rr	(hl)		; divide by two (CY gets bit 0)
+0858  2b           2078 	dec	hl		; to next byte
+0859  10fb         2079 	djnz	ints		; complete shift through mantissa
+                   2080 
+085b  21d600       2081 	ld	hl,fp0+4	; address exponent
+085e  34           2082 	inc	(hl)		; increased
+085f  18e8         2083 	jr	intc		; repeat
+                   2084 
+                   2085 ; now normalize the register and return
+                   2086 
+0861  af           2087 intr:	xor	a
+0862  32d200       2088 	ld	(fp0),a		; guard byte zero to drop fractional part
+0865  c3c807       2089 	jp	norm
+                   2090 
+                   2091 ; **********
+                   2092 ; Subroutine: _abs
+                   2093 ; **********
+                   2094 
+                   2095 ; ABS Function
+                   2096 
+0868  21d500       2097 _abs:	ld	hl,fp0+3	; address MSB of mantissa
+086b  cbbe         2098 	res	7,(hl)		; forced positive!
+086d  c9           2099 	ret
+                   2100 
+                   2101 ; **********
+                   2102 ; Subroutine: _atn
+                   2103 ; **********
+                   2104 
+                   2105 ; ATN Function
+                   2106 
+086e  cd500b       2107 _atn:	call	savreg		; save registers
+                   2108 
+0871  3ad500       2109 	ld	a,(fp0+3)	; get sign of value
+0874  e680         2110 	and	080h		; test sign - negative?
+0876  2809         2111 	jr	z,atn0		; NO! then no need to negate
+                   2112 
+0878  cdc001       2113 	call	_chs		; change sign
+087b  cd8108       2114 	call	atn0		; calculate ATN(-X)
+087e  c3c001       2115 	jp	_chs		; negate before returning
+                   2116 
+0881  3ad600       2117 atn0:	ld	a,(fp0+4)	; get exponent of value
+0884  fe81         2118 	cp	081h		; greater than 1?
+0886  381b         2119 	jr	c,atn1		; NO then jump and perform series approx.
+                   2120 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 45
+
+
+                   2121 ; take inverse
+                   2122 
+0888  21b50a       2123 	ld	hl,one
+088b  cd110b       2124 	call	push
+088e  cdae01       2125 	call	_swap
+0891  cd0a07       2126 	call	_div		; 1/X
+                   2127 
+0894  cda308       2128 	call	atn1		; calculate series approximation
+                   2129 
+                   2130 ; after series will deduct from Pi over 2
+                   2131 
+0897  213709       2132 	ld	hl,halfpi
+089a  cd110b       2133 	call	push
+089d  cdae01       2134 	call	_swap
+08a0  c3a005       2135 	jp	_sub		; subtract and return
+                   2136 
+                   2137 ; perform series approximation to ATN()
+                   2138 
+08a3  21a908       2139 atn1:	ld	hl,atntbl	; table of arctangent coefficients
+08a6  c3d60a       2140 	jp	series		; calculate series
+                   2141 
+                   2142 ; arctangent series data table
+                   2143 
+08a9  09           2144 atntbl: defb	9		; ARCTANGENT
+                   2145 
+08aa  4ad73b78     2146 	defb	04ah,0d7h,03bh,078h	; +.00286623
+08ae  026e847b     2147 	defb	002h,06eh,084h,07bh	; -.01616574
+08b2  fec12f7c     2148 	defb	0feh,0c1h,02fh,07ch	; +.04290961
+08b6  74319a7d     2149 	defb	074h,031h,09ah,07dh	; -.07528964
+08ba  843d5a7d     2150 	defb	084h,03dh,05ah,07dh	; +.10656265
+08be  c87f917e     2151 	defb	0c8h,07fh,091h,07eh	; -.14208901
+08c2  e4bb4c7e     2152 	defb	0e4h,0bbh,04ch,07eh	; +.19993550
+08c6  6caaaa7f     2153 	defb	06ch,0aah,0aah,07fh	; -.33333146
+08ca  00000081     2154 	defb	000h,000h,000h,081h	; +1.0000000
+                   2155 
+                   2156 ; **********
+                   2157 ; Subroutine: _tan
+                   2158 ; **********
+                   2159 
+                   2160 ; TAN Function
+                   2161 ;  Implemented as SIN(x)/COS(x)
+                   2162 
+08ce  cd500b       2163 _tan:	call	savreg
+08d1  cdc801       2164 	call	_enter		; need an extra copy of X
+08d4  cdec08       2165 	call	_sin		; SIN(x)
+08d7  cdae01       2166 	call	_swap		; retrieve X
+08da  cde008       2167 	call	_cos		; COS(x)
+08dd  c30a07       2168 	jp	_div		; return SIN(x)/COS(x)
+                   2169 
+                   2170 ; **********
+                   2171 ; Subroutine: _cos
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 46
+
+
+                   2172 ; **********
+                   2173 
+                   2174 ; COS Function
+                   2175 
+08e0  cd500b       2176 _cos:	call	savreg
+                   2177 
+08e3  213709       2178 	ld	hl,halfpi	; pi over two to convert to SIN
+08e6  cd110b       2179 	call	push
+08e9  cda805       2180 	call	_add
+                   2181 
+                   2182 ; **********
+                   2183 ; Subroutine: _sin
+                   2184 ; **********
+                   2185 
+                   2186 ; SIN Function
+                   2187 
+08ec  cd500b       2188 _sin:	call	savreg
+                   2189 
+08ef  215009       2190 	ld	hl,twopi
+08f2  cd110b       2191 	call	push
+08f5  cd0a07       2192 	call	_div		; X /= (2*Pi)
+                   2193 
+08f8  cdc801       2194 	call	_enter		; retain copy of X
+08fb  cd3308       2195 	call	_int
+08fe  cda005       2196 	call	_sub		; retain only the fractional part
+                   2197 
+0901  21b90a       2198 	ld	hl,ahalf	; 0.50000
+0904  cd110b       2199 	call	push
+0907  cda005       2200 	call	_sub		; X -= 0.50
+                   2201 
+090a  3ad500       2202 	ld	a,(fp0+3)	; get MSB of mantissa
+090d  e680         2203 	and	080h		; extract sign
+090f  f5           2204 	push	af
+0910  ccc001       2205 	call	z,_chs
+                   2206 
+0913  213b09       2207 	ld	hl,aforth	; 0.250000
+0916  cd110b       2208 	call	push
+0919  cda805       2209 	call	_add		; X += 0.35
+                   2210 
+091c  3ad500       2211 	ld	a,(fp0+3)	; obtain MSB of mantissa
+091f  e680         2212 	and	080h		; check sign
+0921  ccc001       2213 	call	z,_chs		; negat the value if positive
+                   2214 
+0924  213b09       2215 	ld	hl,aforth	; 0.2500000
+0927  cd110b       2216 	call	push
+092a  cda805       2217 	call	_add		; X += 0.25
+                   2218 
+092d  f1           2219 	pop	af
+092e  ccc001       2220 	call	z,_chs		; negate again if required
+                   2221 
+0931  213f09       2222 	ld	hl,sintbl	; table of SIN series coefficients
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 47
+
+
+0934  c3d60a       2223 	jp	series		; calculate series
+                   2224 
+0937  db0f4981     2225 halfpi: defb	0dbh,00fh,049h,081h	; 1.5707964, cos(x)=sin(x+1.5708)
+093b  0000007f     2226 aforth: defb	000h,000h,000h,07fh	; 0.2500000
+                   2227 
+                   2228 ; sine series data table
+                   2229 
+093f  05           2230 sintbl: defb	5
+                   2231 
+0940  bad71e86     2232 	defb	0bah,0d7h,01eh,086h	; +39.71067
+0944  64269987     2233 	defb	064h,026h,099h,087h	; -76.574981
+0948  58342387     2234 	defb	058h,034h,023h,087h	; +81.602233
+094c  e05da586     2235 	defb	0e0h,05dh,0a5h,086h	; -41.341675
+0950  da0f4983     2236 twopi:	defb	0dah,00fh,049h,083h	; +6.283185, twice Pi
+                   2237 
+                   2238 ; **********
+                   2239 ; Subroutine: _sqrt
+                   2240 ; **********
+                   2241 
+                   2242 ; Take the Square Root of X
+                   2243 
+0954  cd500b       2244 _sqrt:	call	savreg
+                   2245 
+0957  21b90a       2246 	ld	hl,ahalf
+095a  cd110b       2247 	call	push
+095d  1804         2248 	jr	ytox$
+                   2249 
+                   2250 ; **********
+                   2251 ; Subroutine: _ytox
+                   2252 ; **********
+                   2253 
+                   2254 ; Y^X Any base to any exponent function
+                   2255 ;  uses:  Y^X = exp( X * ln(Y) )
+                   2256 
+095f  21bc07       2257 _ytox:	ld	hl,discard
+0962  e5           2258 	push	hl		; set to discard after calculation
+                   2259 
+0963  cd500b       2260 ytox$:	call	savreg
+                   2261 
+0966  3adb00       2262 	ld	a,(fp1+4)	; exponent of Y
+0969  a7           2263 	and	a		; Y=0?
+096a  2019         2264 	jr	nz,ytox1	; NO! then continue
+                   2265 
+096c  3ad600       2266 	ld	a,(fp0+4)	; exponent of X
+096f  a7           2267 	and	a		; X=0?
+0970  280d         2268 	jr	z,ytox0		; YES! then report error
+                   2269 
+0972  3ad500       2270 	ld	a,(fp0+3)	; MSB of X mantissa
+0975  e680         2271 	and	080h		; test sign - negative?
+0977  2006         2272 	jr	nz,ytox0	; YES! then report error
+                   2273 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 48
+
+
+                   2274 ; otherwise the result is zero
+                   2275 
+0979  cdbc07       2276 	call	discard
+097c  c35e01       2277 	jp	_clx
+                   2278 
+                   2279 ; Report Divide by Zero Error
+                   2280 
+097f  21c800       2281 ytox0:	ld	hl,flags
+0982  cbce         2282 	set	1,(hl)		; set divide by zero flag
+0984  c9           2283 	ret
+                   2284 
+0985  3ad600       2285 ytox1:	ld	a,(fp0+4)	; exponent of X
+0988  a7           2286 	and	a		; X=0?
+0989  200c         2287 	jr	nz,ytox2	; NO! then proceed to calculate
+                   2288 
+                   2289 ; Y^0 returns 1.000 always
+                   2290 
+098b  cd270b       2291 	call	pop		; discard X
+098e  cd270b       2292 	call	pop		; discard Y
+                   2293 
+0991  21b50a       2294 	ld	hl,one
+0994  c3110b       2295 	jp	push		; returns 1.000
+                   2296 
+                   2297 ; Now we must calculate using natural logarithms
+                   2298 
+0997  3ada00       2299 ytox2:	ld	a,(fp1+3)	; MSB of Y mantissa
+099a  e680         2300 	and	080h		; test sign - positive?
+099c  2839         2301 	jr	z,ytox3		; YES! then take LN() without sign inversion
+                   2302 
+                   2303 ; now since the base is negative we must have an integer exponent or the
+                   2304 ;  operation is illegal
+                   2305 
+099e  cdc801       2306 	call	_enter
+09a1  cd3308       2307 	call	_int
+                   2308 
+                   2309 ; compare X to int(X)
+                   2310 
+09a4  21d600       2311 	ld	hl,fp0+4
+09a7  11db00       2312 	ld	de,fp1+4
+09aa  0604         2313 	ld	b,4		; exponent and three mantissa bytes
+                   2314 
+09ac  1a           2315 ytoxl:	ld	a,(de)
+09ad  be           2316 	cp	(hl)
+09ae  2021         2317 	jr	nz,ytoxb	; Bad operation if not integer
+                   2318 
+09b0  2b           2319 	dec	hl
+09b1  1b           2320 	dec	de
+09b2  10f8         2321 	djnz	ytoxl		; repeat through value
+                   2322 
+09b4  cd270b       2323 	call	pop		; discard integer copy of X
+09b7  cdcf02       2324 	call	_ftoi
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 49
+
+
+09ba  7d           2325 	ld	a,l		; obtain least significant byte
+09bb  1f           2326 	rra			; move least significant bit to CY
+09bc  f5           2327 	push	af		; save state even or odd
+                   2328 
+                   2329 ; here we negate Y before taking the LN()
+                   2330 
+09bd  cdae01       2331 	call	_swap		; exchange Y and X to operate on Y first
+09c0  cdc001       2332 	call	_chs		; -Y
+09c3  cd5a0a       2333 	call	_ln		; ln(-Y)
+09c6  cd7c06       2334 	call	_mul		; X*(ln(-Y))
+09c9  cde009       2335 	call	_exp		; exp(X*ln(-Y))
+                   2336 
+09cc  f1           2337 	pop	af		; exponent odd?
+09cd  dcc001       2338 	call	c,_chs		; YES! then negate result
+09d0  c9           2339 	ret
+                   2340 
+09d1  cd270b       2341 ytoxb:	call	pop		; discard integer copy of X
+09d4  c30b0b       2342 	jp	badfn		; report illegal operation
+                   2343 
+09d7  cdae01       2344 ytox3:	call	_swap		; exchange Y and X to operate on Y first
+09da  cd5a0a       2345 	call	_ln		; take ln(Y)
+09dd  cd7c06       2346 	call	_mul		; calculate X*ln(Y)
+                   2347 
+                   2348 ; **********
+                   2349 ; Subroutine: _exp
+                   2350 ; **********
+                   2351 
+                   2352 ; EXP(X) Exponential function
+                   2353 
+09e0  cd500b       2354 _exp:	call	savreg
+09e3  cdc801       2355 	call	_enter		; save value
+                   2356 
+                   2357 ; scale X to range for best fit using the following rule:
+                   2358 ;	exp(x) = 2^c * exp( x - c*ln(2) )   where c = 1 + int( x/ln(2) )
+                   2359 
+09e6  21350a       2360 	ld	hl,econs0	; 1.442695
+09e9  cd110b       2361 	call	push
+09ec  cd7c06       2362 	call	_mul		; multiply
+                   2363 
+09ef  3ad600       2364 	ld	a,(fp0+4)	; exponent of FP0
+09f2  fe88         2365 	cp	088h		; check max
+09f4  3039         2366 	jr	nc,expof	; overflow
+                   2367 
+09f6  cd3308       2368 	call	_int		; take integer part
+                   2369 
+09f9  cdcf02       2370 	call	_ftoi		; obtain integer value in reg.hl
+09fc  7d           2371 	ld	a,l
+09fd  c680         2372 	add	080h		; adjust to excess 128 notation
+09ff  c602         2373 	add	2
+0a01  382c         2374 	jr	c,expof
+                   2375 	
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 50
+
+
+0a03  f5           2376 	push	af		; save value
+                   2377 
+0a04  21b50a       2378 	ld	hl,one		; 1.00000
+0a07  cd110b       2379 	call	push
+0a0a  cda805       2380 	call	_add
+                   2381 
+0a0d  21bd0a       2382 	ld	hl,cons0	; 0.693147
+0a10  cd110b       2383 	call	push
+0a13  cd7c06       2384 	call	_mul
+                   2385 
+0a16  cda005       2386 	call	_sub
+0a19  cdc001       2387 	call	_chs
+                   2388 
+0a1c  21390a       2389 	ld	hl,exptbl	; table of coeficients for approximation
+0a1f  cde70a       2390 	call	poly		; calculate polynomial
+                   2391 
+                   2392 ; create scaling factor
+                   2393 
+0a22  cdc801       2394 	call	_enter
+0a25  cd5e01       2395 	call	_clx
+                   2396 
+0a28  f1           2397 	pop	af
+0a29  32d600       2398 	ld	(fp0+4),a	; .5 * 2^(c+2)
+0a2c  c37c06       2399 	jp	_mul		; multiply and return
+                   2400 
+0a2f  cd270b       2401 expof:	call	pop  		; reset stack
+0a32  c31608       2402 	jp	oflow
+                   2403 
+0a35  3baa3881     2404 econs0:	defb	03bh,0aah,038h,081h	; 1.44270   1/ln(2)
+                   2405 
+                   2406 ; exponential function series data table
+                   2407 
+0a39  08           2408 exptbl: defb	8		; EXP function coefficients
+                   2409 
+0a3a  402e9474     2410 	defb	040h,02eh,094h,074h	; -0.00014132
+0a3e  704f2e77     2411 	defb	070h,04fh,02eh,077h	; +0.00132988
+0a42  6e02887a     2412 	defb	06eh,002h,088h,07ah	; -0.00830136
+0a46  e6a02a7c     2413 	defb	0e6h,0a0h,02ah,07ch	; +0.04165735
+0a4a  50aaaa7e     2414 	defb	050h,0aah,0aah,07eh	; -0.16666532
+0a4e  ffff7f7f     2415 	defb	0ffh,0ffh,07fh,07fh	; +0.49999997
+0a52  00008081     2416 	defb	000h,000h,080h,081h	; -1.00000000
+0a56  00000081     2417 	defb	000h,000h,000h,081h	; +1.00000000
+                   2418 
+                   2419 ; **********
+                   2420 ; Subroutine: _ln
+                   2421 ; **********
+                   2422 
+                   2423 ; Calculate the Natural Logarithm of FP0
+                   2424 
+0a5a  cd500b       2425 _ln:	call	savreg
+                   2426 
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 51
+
+
+0a5d  3ad600       2427 	ld	a,(fp0+4)
+0a60  a7           2428 	and	a		; zero?
+0a61  ca0b0b       2429 	jp	z,badfn		; YES! then Illegal Function
+                   2430 
+0a64  3ad500       2431 	ld	a,(fp0+3)	; get sign of the value
+0a67  e680         2432 	and	80h
+0a69  c20b0b       2433 	jp	nz,badfn	; NEGATIVE! - Illegal Function
+                   2434 
+0a6c  21d600       2435 	ld	hl,fp0+4	; address exponent
+0a6f  7e           2436 	ld	a,(hl)		; fetch the exponent
+0a70  3680         2437 	ld	(hl),080h	; scale value to 0.5 - 1.0
+                   2438 
+0a72  d680         2439 	sub	080h		; obtain scaling
+0a74  f5           2440 	push	af		; save integer scaling value
+                   2441 
+0a75  21c10a       2442 	ld	hl,cons1
+0a78  cd110b       2443 	call	push		; load 0.707107   sqrt(1/2)
+0a7b  cda805       2444 	call	_add		; add to value
+                   2445 
+0a7e  21c50a       2446 	ld	hl,cons2	; load 1.414214   sqrt(2)
+0a81  cd110b       2447 	call	push
+0a84  cdae01       2448 	call	_swap
+0a87  cd0a07       2449 	call	_div		; divide
+                   2450 
+0a8a  21b50a       2451 	ld	hl,one		; 1.00000
+0a8d  cd110b       2452 	call	push
+0a90  cdae01       2453 	call	_swap
+0a93  cda005       2454 	call	_sub		; subtract
+                   2455 
+0a96  21c90a       2456 	ld	hl,natlog	; natural log series coeficients
+0a99  cdd60a       2457 	call	series		; calculate series
+                   2458 
+0a9c  21b90a       2459 	ld	hl,ahalf
+0a9f  cd110b       2460 	call	push		; load 0.50000
+0aa2  cda005       2461 	call	_sub
+                   2462 
+0aa5  f1           2463 	pop	af		; retrieve scaling
+0aa6  cdad02       2464 	call	_btof		; load to FP0
+0aa9  cda805       2465 	call	_add
+                   2466 
+0aac  21bd0a       2467 	ld	hl,cons0
+0aaf  cd110b       2468 	call	push
+0ab2  c37c06       2469 	jp	_mul		; multiply by 0.6931478 and return
+                   2470 
+0ab5  00000081     2471 one:	defb	000h,000h,000h,081h	; +1.00000
+0ab9  00000080     2472 ahalf:	defb	000h,000h,000h,080h	; 0.500000
+0abd  18723180     2473 cons0:	defb	018h,072h,031h,080h	; 0.693147  ln(1/2)
+0ac1  f3043580     2474 cons1:	defb	0f3h,004h,035h,080h	; 0.707107  sqrt(1/2)
+0ac5  f3043581     2475 cons2:	defb	0f3h,004h,035h,081h	; 1.414214  sqrt(2)
+                   2476 
+                   2477 ; coefficients for natural log approximation
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 52
+
+
+                   2478 
+0ac9  03           2479 natlog: defb	3		; three FP array
+                   2480 
+0aca  aa561980     2481 	defb	0aah,056h,019h,080h	; +0.598979
+0ace  f1227680     2482 	defb	0f1h,022h,076h,080h	; +0.961471
+0ad2  45aa3882     2483 	defb	045h,0aah,038h,082h	; +2.885392
+                   2484 
+                   2485 ; calculate the series
+                   2486 ;	f(x) = x * p(x^2)
+                   2487 ;	HL contains address of coefficients
+                   2488 
+                   2489 ; square the value
+                   2490 
+0ad6  e5           2491 series:	push	hl		; save address to coefficients
+0ad7  cdc801       2492 	call	_enter		; duplicate FP0 twice
+0ada  cdc801       2493 	call	_enter
+0add  cd7c06       2494 	call	_mul		; multiply
+                   2495 
+0ae0  e1           2496 	pop	hl		; retrieve address
+0ae1  cde70a       2497 	call	poly		; obtain value for polynomial
+0ae4  c37c06       2498 	jp	_mul		; multiply by FP0 and return
+                   2499 
+                   2500 ; calculates the polynomial expression
+                   2501 ;	p(x) = a0*x^(n) + a1*x^(n-1) + a2*x^(n-2) + ... + a(n)
+                   2502 ;	where n is the number of coefficients
+                   2503 
+0ae7  e5           2504 poly:	push	hl		; save pointer
+0ae8  cd3f0b       2505 	call	savez		; save X
+0aeb  cd270b       2506 	call	pop		; discard
+                   2507 
+0aee  e1           2508 	pop	hl		; retrieve pointer
+0aef  46           2509 	ld	b,(hl)		; get number of coefficients
+0af0  23           2510 	inc	hl		; advance to first coefficient
+0af1  c5           2511 	push	bc
+                   2512 
+0af2  cd110b       2513 	call	push		; load coefficient from (reg.hl) into acc
+                   2514 
+0af5  c1           2515 poly0:	pop	bc		; retrieve count
+0af6  05           2516 	dec	b		; countdown coefficients used - done?
+0af7  c8           2517 	ret	z		; YES! then return
+                   2518 
+0af8  c5           2519 	push	bc		; save counter
+0af9  e5           2520 	push	hl		; save pointer
+0afa  cd4b0b       2521 	call	loadz		; retrieve X
+0afd  cd7c06       2522 	call	_mul		; multiply
+                   2523 
+0b00  e1           2524 	pop	hl		; retrieve pointer
+0b01  cd110b       2525 	call	push		; obtain coefficient from (reg.hl)
+                   2526 
+0b04  e5           2527 	push	hl		; save address
+0b05  cda805       2528 	call	_add		; add registers to Fp acc
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 53
+
+
+                   2529 
+0b08  e1           2530 	pop	hl		; retrieve pointer
+0b09  18ea         2531 	jr	poly0		; repeat
+                   2532 
+                   2533 ; Reports Illegal Operation
+                   2534 
+0b0b  21c800       2535 badfn:	ld	hl,flags
+0b0e  cbd6         2536 	set	2,(hl)		; Bad Function 
+0b10  c9           2537 	ret
+                   2538 
+                   2539 ; ***************************************************************************
+                   2540 ; 			   Internal Utility Routines
+                   2541 ; ***************************************************************************
+                   2542 
+                   2543 ; Routine enters the value addressed by reg.hl.  The registers are pushed
+                   2544 ;  down and FP0 is loaded.
+                   2545 
+0b11  e5           2546 push:	push	hl		; save address of value to be entered
+                   2547 
+0b12  210801       2548 	ld	hl,fpx-6	; source
+0b15  110d01       2549 	ld	de,fpx-1	; destination
+0b18  013700       2550 	ld	bc,5*(numreg-1)	; full registers are moved
+0b1b  edb8         2551 	lddr			; copy proceeds in reverse direction
+                   2552 
+0b1d  e1           2553 	pop	hl
+0b1e  11d300       2554 	ld	de,fp0+1	; address register FP0
+0b21  010400       2555 	ld	bc,4		; move FP value
+0b24  edb0         2556 	ldir
+0b26  c9           2557 	ret			; FP0 entered
+                   2558 
+                   2559 ; Routine performs a POP on the registers.  All registers move up and
+                   2560 ;  FP3 is duplicated.
+                   2561 
+0b27  21d700       2562 pop:	ld	hl,fp1		; source
+0b2a  11d200       2563 	ld	de,fp0		; destination
+0b2d  013700       2564 	ld	bc,5*(numreg-1)	; full registers are moved
+0b30  edb0         2565 	ldir			; copy
+0b32  c9           2566 	ret			; registers poped
+                   2567 
+                   2568 ; Routine saves value of accumulator
+                   2569 
+0b33  21d200       2570 savex:	ld	hl,fp0
+0b36  110e01       2571 	ld	de,fpx
+0b39  010500       2572 	ld	bc,5
+0b3c  edb0         2573 	ldir			; copy FP0 to FPX
+0b3e  c9           2574 	ret
+                   2575 
+                   2576 ; Routine loads FPZ from FP0
+                   2577 
+0b3f  21d200       2578 savez:	ld	hl,fp0
+0b42  111801       2579 	ld	de,fpz
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 54
+
+
+0b45  010500       2580 	ld	bc,5
+0b48  edb0         2581 	ldir			; copy FP0 to FPX
+0b4a  c9           2582 	ret
+                   2583 
+                   2584 ; Routine pushes FPZ onto the stack
+                   2585 
+0b4b  211901       2586 loadz:	ld	hl,fpz+1
+0b4e  18c1         2587 	jr	push
+                   2588 
+                   2589 ; Routine saves register set to free registers for internal use.  This occurs
+                   2590 ;  only on the initial call to this routine.  A flag is set to prevent
+                   2591 ;  additional register saves and a return address is pushed onto the stack
+                   2592 ;  to cause the register set to be restored before exit
+                   2593 
+0b50  21ca00       2594 savreg:	ld	hl,stkd		; address stack depth counter
+0b53  cb46         2595 	bit	0,(hl)		; stack already saved?
+0b55  c0           2596 	ret	nz		; YES! then no action
+                   2597 
+0b56  36ff         2598 	ld	(hl),-1		; indicate registers are saved
+                   2599 
+0b58  217d0b       2600 	ld	hl,restore	; address of restore routine
+0b5b  e3           2601 	ex	(sp),hl		; swap for return address
+0b5c  e5           2602 	push	hl		; save our return address
+                   2603 
+                   2604 ; the flags are cleared
+                   2605 
+0b5d  21c800       2606 	ld	hl,flags
+0b60  3600         2607 	ld	(hl),0		; clear flags
+                   2608 
+                   2609 ; registers are saved now
+                   2610 
+0b62  cd330b       2611 	call	savex		; save LASTX
+                   2612 
+0b65  21d200       2613 	ld	hl,fp0
+0b68  111d01       2614 	ld	de,regs
+0b6b  014100       2615 	ld	bc,5*(numreg+1)	; save full registers
+0b6e  edb0         2616 	ldir
+0b70  c9           2617 	ret			; done!
+                   2618 
+                   2619 ; Routine restores register FP0 before final restore so that ALL registers
+                   2620 ;  are restored.
+                   2621 
+0b71  211d01       2622 rest0:	ld	hl,regs
+0b74  11d200       2623 	ld	de,fp0
+0b77  010500       2624 	ld	bc,5		; restore FP0
+0b7a  edb0         2625 	ldir
+0b7c  c9           2626 	ret
+                   2627 
+                   2628 ; Routine returns registers
+                   2629 
+                   2630 restore:
+
+Sun  22-Feb-2026  10:58a  =================================================================================  fp.z80  Page 55
+
+
+0b7d  21ca00       2631 	ld	hl,stkd		; stack counter address
+0b80  3600         2632 	ld	(hl),0		; clear flag
+                   2633 
+                   2634 ; Now restore the register set
+                   2635 
+0b82  212201       2636 	ld	hl,regs+5
+0b85  11d700       2637 	ld	de,fp1
+0b88  013c00       2638 	ld	bc,5*numreg	; restore all registers beyond FP0
+0b8b  edb0         2639 	ldir
+0b8d  c9           2640 	ret
+                   2641 
+
+
+Errors		   0
+
+
