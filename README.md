@@ -9,3 +9,6 @@ there are any of those instructions in this.
 
 Let me know what you think!
 
+Note that the required macro assembler ASMB is now available in a separate 
+repository: asmb-cloutier
+
